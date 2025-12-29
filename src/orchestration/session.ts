@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import { v4 as uuidv4 } from 'uuid';
 import { Session, SessionConfig, SpecEntry, ToolName } from '../types.js';
 import { ensureDir, pathExists, readTextFile, writeTextFile } from '../utils/fs.js';
-import { getSessionsDir, PROJECT_LINK_FILE, SPECS_DIR } from '../config/paths.js';
+import { getProjectSessionsDir, PROJECT_SESSION_FILE, SPECS_DIR } from '../config/paths.js';
 
 export interface CreateSessionOptions {
   cwd: string;
@@ -30,12 +30,13 @@ export async function createSession(options: CreateSessionOptions): Promise<Sess
     updatedAt: now
   };
   await persistSession(session, options.env);
-  await fs.writeFile(path.join(options.cwd, PROJECT_LINK_FILE), session.id, 'utf8');
+  await ensureDir(path.join(options.cwd, '.ai-coord'));
+  await fs.writeFile(path.join(options.cwd, PROJECT_SESSION_FILE), session.id, 'utf8');
   return session;
 }
 
 export async function persistSession(session: Session, env: NodeJS.ProcessEnv = process.env): Promise<void> {
-  const sessionsDir = getSessionsDir(env);
+  const sessionsDir = getProjectSessionsDir(session.workingDirectory);
   await ensureDir(sessionsDir);
   session.updatedAt = new Date().toISOString();
   const sessionPath = path.join(sessionsDir, `${session.id}.json`);
@@ -43,7 +44,7 @@ export async function persistSession(session: Session, env: NodeJS.ProcessEnv = 
 }
 
 export async function loadSession(cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<Session | null> {
-  const linkPath = path.join(cwd, PROJECT_LINK_FILE);
+  const linkPath = path.join(cwd, PROJECT_SESSION_FILE);
   if (!(await pathExists(linkPath))) {
     return null;
   }
@@ -51,11 +52,15 @@ export async function loadSession(cwd: string, env: NodeJS.ProcessEnv = process.
   if (!sessionId) {
     return null;
   }
-  return loadSessionById(sessionId, env);
+  return loadSessionById(cwd, sessionId, env);
 }
 
-export async function loadSessionById(sessionId: string, env: NodeJS.ProcessEnv = process.env): Promise<Session | null> {
-  const sessionPath = path.join(getSessionsDir(env), `${sessionId}.json`);
+export async function loadSessionById(
+  cwd: string,
+  sessionId: string,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<Session | null> {
+  const sessionPath = path.join(getProjectSessionsDir(cwd), `${sessionId}.json`);
   if (!(await pathExists(sessionPath))) {
     return null;
   }
@@ -66,6 +71,6 @@ export async function loadSessionById(sessionId: string, env: NodeJS.ProcessEnv 
 export async function completeSession(session: Session, env: NodeJS.ProcessEnv = process.env): Promise<void> {
   session.status = 'completed';
   await persistSession(session, env);
-  const linkPath = path.join(session.workingDirectory, PROJECT_LINK_FILE);
+  const linkPath = path.join(session.workingDirectory, PROJECT_SESSION_FILE);
   await fs.rm(linkPath, { force: true });
 }

@@ -3,15 +3,25 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { runCoordinator } from '../../src/orchestration/run';
 import { createTempDir, makeExecutable } from '../helpers';
-import { RunOptions } from '../../src/types';
+import { RunOptions, ExecutionResult, ToolName } from '../../src/types';
 
 const specContent = `---\nspecmas: v3\nkind: FeatureSpec\nid: feat-core\nname: Core\nversion: 1.0.0\ncomplexity: EASY\nmaturity: 3\n---\n# Core`;
 
-class MockRunner {
-  async runLead(_tool: string, _prompt: string, _cwd: string, _timeoutMs: number) {
-    return { output: 'done', exitCode: 0, durationMs: 5, streamed: false };
+class HangingRunner {
+  private leadResolve?: (value: ExecutionResult) => void;
+  private leadStartedResolve?: () => void;
+  leadStarted = new Promise<void>((resolve) => {
+    this.leadStartedResolve = resolve;
+  });
+
+  async runLead(_tool: ToolName, _prompt: string, _cwd: string, _timeoutMs: number): Promise<ExecutionResult> {
+    return new Promise<ExecutionResult>((resolve) => {
+      this.leadResolve = resolve;
+      this.leadStartedResolve?.();
+    });
   }
-  async runValidator(_tool: string, _prompt: string, _cwd: string, _timeoutMs: number) {
+
+  async runValidator(): Promise<ExecutionResult> {
     return {
       output: 'COMPLETENESS: 100%\nSTATUS: PASS\nGAPS:\n- None\nRECOMMENDATIONS:\n- None',
       exitCode: 0,
@@ -19,10 +29,14 @@ class MockRunner {
       streamed: false
     };
   }
+
+  resolveLead() {
+    this.leadResolve?.({ output: 'done', exitCode: 0, durationMs: 5, streamed: false });
+  }
 }
 
-describe('runCoordinator integration', () => {
-  it('creates session and report', async () => {
+describe('SIGINT handling', () => {
+  it('persists session state on interrupt', async () => {
     const projectDir = await createTempDir('aic-project-');
     const specsDir = path.join(projectDir, 'specs');
     await fs.mkdir(specsDir, { recursive: true });
@@ -32,8 +46,6 @@ describe('runCoordinator integration', () => {
     const fakeTool = `#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"tool 1.0.0\"\n  exit 0\nfi\nexit 0\n`;
     await makeExecutable(path.join(binDir, 'claude'), fakeTool);
     await makeExecutable(path.join(binDir, 'codex'), fakeTool);
-
-    const stateDir = await createTempDir('aic-state-');
 
     const options: RunOptions = {
       specs: undefined,
@@ -48,24 +60,38 @@ describe('runCoordinator integration', () => {
       sandbox: false,
       interactive: false,
       verbose: false,
+      heartbeat: 0,
       quiet: true,
       dryRun: false
     };
 
-    await runCoordinator(options, {
+    const runner = new HangingRunner();
+    const originalExit = process.exit;
+    // Prevent the SIGINT handler from exiting the test process.
+    process.exit = (() => undefined) as unknown as typeof process.exit;
+
+    const runPromise = runCoordinator(options, {
       cwd: projectDir,
       output: process.stdout,
       errorOutput: process.stderr,
       env: {
         ...process.env,
         PATH: `${binDir}:${process.env.PATH}`,
-        AIC_STATE_DIR: stateDir
+        AIC_NO_EXIT: '1'
       }
-    }, { runner: new MockRunner() });
+    }, { runner });
 
-    const reportPath = path.join(projectDir, '.ai-coord', 'reports');
-    const reportFiles = await fs.readdir(reportPath);
-    expect(reportFiles.length).toBe(2);
-    expect(reportFiles.some((file) => file.includes('-codex'))).toBe(true);
+    await runner.leadStarted;
+    process.emit('SIGINT');
+    runner.resolveLead();
+    await runPromise;
+
+    process.exit = originalExit;
+
+    const sessionIdPath = path.join(projectDir, '.ai-coord', 'session');
+    const sessionId = (await fs.readFile(sessionIdPath, 'utf8')).trim();
+    const sessionFile = path.join(projectDir, '.ai-coord', 'sessions', `${sessionId}.json`);
+    const sessionExists = await fs.stat(sessionFile).then(() => true).catch(() => false);
+    expect(sessionExists).toBe(true);
   });
 });

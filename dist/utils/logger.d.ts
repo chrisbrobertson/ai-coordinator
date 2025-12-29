@@ -1,2 +1,2 @@
 import pino from 'pino';
-export declare function createLogger(sessionId: string, env?: NodeJS.ProcessEnv): Promise<pino.Logger<never, boolean>>;
+export declare function createLogger(sessionId: string, cwd: string): Promise<pino.Logger<never, boolean>>;

@@ -106,6 +106,7 @@ export interface RunOptions {
   sandbox: boolean;
   interactive: boolean;
   verbose: boolean;
+  heartbeat: number;
   quiet: boolean;
   dryRun: boolean;
 }
@@ -128,6 +129,7 @@ export interface ExecutionResult {
   output: string;
   exitCode: number;
   durationMs: number;
+  streamed: boolean;
 }
 
 export interface ToolRunner {

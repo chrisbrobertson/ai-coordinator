@@ -1,5 +1,10 @@
-export declare const PROJECT_LINK_FILE = ".ai-coord";
+export declare const PROJECT_STATE_DIR = ".ai-coord";
+export declare const PROJECT_SESSION_FILE: string;
 export declare const SPECS_DIR = "specs";
+export declare function getProjectStateDir(cwd: string): string;
+export declare function getProjectSessionsDir(cwd: string): string;
+export declare function getProjectReportsDir(cwd: string): string;
+export declare function getProjectLogsDir(cwd: string): string;
 export declare function getStateDir(env?: NodeJS.ProcessEnv): string;
 export declare function getSessionsDir(env?: NodeJS.ProcessEnv): string;
 export declare function getReportsDir(env?: NodeJS.ProcessEnv): string;
