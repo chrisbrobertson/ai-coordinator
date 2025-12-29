@@ -1,4 +1,4 @@
-import { ToolName } from '../types';
+import { ToolName } from '../types.js';
 
 export interface ToolDefinition {
   name: ToolName;

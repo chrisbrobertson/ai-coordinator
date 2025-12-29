@@ -3,14 +3,14 @@ import chalk from 'chalk';
 import Table from 'cli-table3';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { detectTools } from '../tools/registry';
-import { runCoordinator } from '../orchestration/run';
-import { loadSpecs, orderSpecs } from '../specs/discovery';
-import { RunContext, RunOptions } from '../types';
-import { PROJECT_LINK_FILE, SPECS_DIR, getLogsDir, getReportsDir, getSessionsDir } from '../config/paths';
-import { loadSession } from '../orchestration/session';
-import { readGlobalConfig, writeGlobalConfig } from '../config/global-config';
-import { ensureDir, pathExists, removePath } from '../utils/fs';
+import { detectTools } from '../tools/registry.js';
+import { runCoordinator } from '../orchestration/run.js';
+import { loadSpecs, orderSpecs } from '../specs/discovery.js';
+import { RunContext, RunOptions } from '../types.js';
+import { PROJECT_LINK_FILE, SPECS_DIR, getLogsDir, getReportsDir, getSessionsDir } from '../config/paths.js';
+import { loadSession } from '../orchestration/session.js';
+import { readGlobalConfig, writeGlobalConfig } from '../config/global-config.js';
+import { ensureDir, pathExists, removePath } from '../utils/fs.js';
 
 export interface CliRunOptions {
   argv: string[];

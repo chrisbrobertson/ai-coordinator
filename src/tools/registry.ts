@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execa } from 'execa';
-import { ToolInfo, ToolName, ToolRegistry } from '../types';
-import { TOOL_DEFINITIONS } from './tool-definitions';
+import { ToolInfo, ToolName, ToolRegistry } from '../types.js';
+import { TOOL_DEFINITIONS } from './tool-definitions.js';
 
 export async function detectTools(env: NodeJS.ProcessEnv = process.env): Promise<ToolRegistry> {
   const available = new Map<ToolName, ToolInfo>();

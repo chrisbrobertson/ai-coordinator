@@ -2,8 +2,8 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { Minimatch } from 'minimatch';
 import YAML from 'yaml';
-import { SpecEntry, SpecMetadata } from '../types';
-import { readTextFile } from '../utils/fs';
+import { SpecEntry, SpecMetadata } from '../types.js';
+import { readTextFile } from '../utils/fs.js';
 
 export interface SpecDiscoveryOptions {
   include?: string[];

@@ -1,5 +1,5 @@
-import { ToolName } from '../types';
-import { getDefaultLeadOrder } from './registry';
+import { ToolName } from '../types.js';
+import { getDefaultLeadOrder } from './registry.js';
 
 export interface RoleAssignment {
   lead: ToolName;

@@ -1,9 +1,9 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { v4 as uuidv4 } from 'uuid';
-import { Session, SessionConfig, SpecEntry, ToolName } from '../types';
-import { ensureDir, pathExists, readTextFile, writeTextFile } from '../utils/fs';
-import { getSessionsDir, PROJECT_LINK_FILE, SPECS_DIR } from '../config/paths';
+import { Session, SessionConfig, SpecEntry, ToolName } from '../types.js';
+import { ensureDir, pathExists, readTextFile, writeTextFile } from '../utils/fs.js';
+import { getSessionsDir, PROJECT_LINK_FILE, SPECS_DIR } from '../config/paths.js';
 
 export interface CreateSessionOptions {
   cwd: string;

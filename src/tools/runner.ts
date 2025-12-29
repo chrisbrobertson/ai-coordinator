@@ -1,6 +1,6 @@
 import { execa } from 'execa';
-import { ExecutionResult, ToolName, ToolRunner } from '../types';
-import { getToolDefinition } from './tool-definitions';
+import { ExecutionResult, ToolName, ToolRunner } from '../types.js';
+import { getToolDefinition } from './tool-definitions.js';
 
 export class DefaultToolRunner implements ToolRunner {
   async runLead(tool: ToolName, prompt: string, cwd: string, timeoutMs: number): Promise<ExecutionResult> {

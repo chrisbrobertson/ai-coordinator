@@ -1,7 +1,7 @@
 import pino from 'pino';
-import { getLogsDir } from '../config/paths';
+import { getLogsDir } from '../config/paths.js';
 import path from 'node:path';
-import { ensureDir } from './fs';
+import { ensureDir } from './fs.js';
 
 export async function createLogger(sessionId: string, env: NodeJS.ProcessEnv = process.env) {
   const logsDir = getLogsDir(env);

@@ -1,6 +1,6 @@
 import path from 'node:path';
-import { getConfigFile } from './paths';
-import { ensureDir, pathExists, readTextFile, writeTextFile } from '../utils/fs';
+import { getConfigFile } from './paths.js';
+import { ensureDir, pathExists, readTextFile, writeTextFile } from '../utils/fs.js';
 
 export interface GlobalConfig {
   defaultLead?: string;

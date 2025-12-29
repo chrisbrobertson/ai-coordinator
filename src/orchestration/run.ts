@@ -2,15 +2,15 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import chalk from 'chalk';
 import ora from 'ora';
-import { DefaultToolRunner } from '../tools/runner';
-import { assignRoles } from '../tools/roles';
-import { detectTools } from '../tools/registry';
-import { loadSpecs, orderSpecs, LoadedSpec } from '../specs/discovery';
-import { createSession, persistSession, completeSession, loadSession } from './session';
-import { getReportsDir, SPECS_DIR } from '../config/paths';
-import { ensureDir, listFilesRecursive, writeTextFile } from '../utils/fs';
-import { RunContext, RunOptions, SpecEntry, ToolRunner, ValidationResult, Session, Validation, ToolName } from '../types';
-import { createLogger } from '../utils/logger';
+import { DefaultToolRunner } from '../tools/runner.js';
+import { assignRoles } from '../tools/roles.js';
+import { detectTools } from '../tools/registry.js';
+import { loadSpecs, orderSpecs, LoadedSpec } from '../specs/discovery.js';
+import { createSession, persistSession, completeSession, loadSession } from './session.js';
+import { getReportsDir, SPECS_DIR } from '../config/paths.js';
+import { ensureDir, listFilesRecursive, writeTextFile } from '../utils/fs.js';
+import { RunContext, RunOptions, SpecEntry, ToolRunner, ValidationResult, Session, Validation, ToolName } from '../types.js';
+import { createLogger } from '../utils/logger.js';
 
 export interface RunDependencies {
   runner?: ToolRunner;
