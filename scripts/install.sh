@@ -8,6 +8,12 @@ Usage: ./scripts/install.sh [--link] [--skip-build]
 Options:
   --link        Run npm link after build to expose aic/ai-coord locally
   --skip-build  Skip npm run build
+  -h, --help    Show this help text and exit
+
+Examples:
+  ./scripts/install.sh
+  ./scripts/install.sh --link
+  ./scripts/install.sh --skip-build
 USAGE
 }
 
@@ -38,6 +44,10 @@ if ! command -v npm >/dev/null 2>&1; then
   echo "npm is required but was not found in PATH." >&2
   exit 1
 fi
+
+echo "Usage: ./scripts/install.sh [--link] [--skip-build]"
+echo "Use --help for details."
+echo "Installing dependencies..."
 
 npm install
 
