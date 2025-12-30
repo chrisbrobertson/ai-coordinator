@@ -65,7 +65,7 @@ describe('runCoordinator integration', () => {
 
     const reportPath = path.join(projectDir, '.ai-coord', 'reports');
     const reportFiles = await fs.readdir(reportPath);
-    expect(reportFiles.length).toBe(2);
+    expect(reportFiles.length).toBe(3);
     expect(reportFiles.some((file) => file.includes('-codex'))).toBe(true);
   });
 });

@@ -6,6 +6,3 @@ dist/
 *.tmp
 .vite/
 node_modules/.vite/
-tests/ai-code-test-spec/
-tests/e2e/
-tests/integration/

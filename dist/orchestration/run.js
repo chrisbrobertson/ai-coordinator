@@ -16,7 +16,7 @@ export async function runCoordinator(options, context, deps = {}) {
     const cwd = context.cwd;
     const output = context.output;
     const errorOutput = context.errorOutput;
-    const spinner = ora({ isEnabled: !options.quiet && !options.verbose });
+    const spinner = ora({ isEnabled: false });
     await autoCleanState(cwd);
     if (options.sandbox) {
         await ensureSandboxAvailable();
@@ -48,11 +48,12 @@ export async function runCoordinator(options, context, deps = {}) {
         return;
     }
     const lowMaturity = entries.filter((spec) => spec.meta.maturity < 3);
+    const testMode = context.env.AIC_TEST_MODE === '1';
     if (lowMaturity.length > 0 && !options.quiet) {
         for (const spec of lowMaturity) {
             output.write(chalk.yellow(`Spec ${spec.file} maturity ${spec.meta.maturity} is below recommended minimum (3).\\n`));
         }
-        const proceed = await confirmProceed();
+        const proceed = testMode ? true : await confirmProceed();
         if (!proceed) {
             throw new Error('Aborted due to low spec maturity.');
         }
@@ -105,7 +106,8 @@ export async function runCoordinator(options, context, deps = {}) {
         sandboxImage: context.env.AIC_SANDBOX_IMAGE ?? 'node:20',
         verbose: options.verbose,
         output,
-        inheritStdin: (options.verbose || options.interactive) && process.stdin.isTTY,
+        inheritStdin: options.interactive && process.stdin.isTTY,
+        env: context.env,
         onSpawn: (info) => {
             activeProcess = info.child;
             if (options.verbose) {
@@ -126,6 +128,7 @@ export async function runCoordinator(options, context, deps = {}) {
     const contextDocs = orderedLoaded.filter((spec) => spec.entry.contextOnly).map((spec) => spec.content);
     await ensureDir(getProjectReportsDir(cwd));
     let interrupted = false;
+    let exitTimer = null;
     const handleSigint = () => {
         if (interrupted) {
             return;
@@ -145,7 +148,7 @@ export async function runCoordinator(options, context, deps = {}) {
             clearInterval(heartbeatTimer);
             heartbeatTimer = null;
         }
-        setTimeout(() => {
+        exitTimer = setTimeout(() => {
             process.exitCode = 130;
             process.exit(130);
         }, 5000);
@@ -192,6 +195,14 @@ export async function runCoordinator(options, context, deps = {}) {
             if (options.verbose && !leadResult.streamed && leadResult.output) {
                 output.write(`${leadResult.output}\n`);
             }
+            if (!leadResult.output || leadResult.output.trim().length === 0) {
+                throw new Error(`Lead tool ${roleAssignment.lead} returned no output.`);
+            }
+            const leadReportPath = buildLeadReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, roleAssignment.lead);
+            await writeTextFile(leadReportPath, leadResult.output || 'No output captured.');
+            if (options.verbose) {
+                output.write(`[report] ${leadReportPath}\n`);
+            }
             if (interrupted) {
                 await persistSession(session, context.env);
                 process.off('SIGINT', handleSigint);
@@ -204,11 +215,22 @@ export async function runCoordinator(options, context, deps = {}) {
                     clearInterval(heartbeatTimer);
                     heartbeatTimer = null;
                 }
+                if (exitTimer) {
+                    clearTimeout(exitTimer);
+                    exitTimer = null;
+                }
+                if (interrupted && process.env.AIC_NO_EXIT !== '1') {
+                    process.exitCode = 130;
+                    process.exit(130);
+                }
                 return;
             }
             logger.info({ cycle: cycleNumber, tool: roleAssignment.lead }, 'Lead execution completed');
+            if (options.verbose) {
+                logger.info({ cycle: cycleNumber, tool: roleAssignment.lead, output: leadResult.output }, 'Lead output');
+            }
             const validationPrompt = await buildValidationPrompt(specContent, contextDocs, cwd, specEntry.file);
-            const validationSpinner = ora({ isEnabled: !options.quiet && !options.verbose });
+            const validationSpinner = ora({ isEnabled: false });
             validationSpinner.start(`Cycle ${cycleNumber}/${iterations}: Validators running`);
             await ensureDir(getProjectReportsDir(cwd));
             const validations = await Promise.all(roleAssignment.validators.map(async (tool) => {
@@ -235,6 +257,11 @@ export async function runCoordinator(options, context, deps = {}) {
                 return toValidation(tool, validationPrompt, result);
             }));
             validationSpinner.stop();
+            if (options.verbose) {
+                validations.forEach((validation) => {
+                    logger.info({ cycle: cycleNumber, tool: validation.tool, output: validation.output }, 'Validator output');
+                });
+            }
             const consensusReached = hasConsensus(validations.map((validation) => validation.parsed));
             if (!consensusReached) {
                 validationFeedback = buildValidationFeedback(validations);
@@ -266,6 +293,14 @@ export async function runCoordinator(options, context, deps = {}) {
                 if (heartbeatTimer) {
                     clearInterval(heartbeatTimer);
                     heartbeatTimer = null;
+                }
+                if (exitTimer) {
+                    clearTimeout(exitTimer);
+                    exitTimer = null;
+                }
+                if (interrupted && process.env.AIC_NO_EXIT !== '1') {
+                    process.exitCode = 130;
+                    process.exit(130);
                 }
                 return;
             }
@@ -309,6 +344,14 @@ export async function runCoordinator(options, context, deps = {}) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;
     }
+    if (exitTimer) {
+        clearTimeout(exitTimer);
+        exitTimer = null;
+    }
+    if (interrupted && process.env.AIC_NO_EXIT !== '1') {
+        process.exitCode = 130;
+        process.exit(130);
+    }
 }
 function formatDryRun(specs, lead, validators) {
     const lines = ['Specs to build:'];
@@ -343,7 +386,7 @@ async function buildValidationPrompt(specContent, contextDocs, cwd, specFile) {
     const contextHint = contextDocs.length > 0
         ? 'System/architecture specs are present in the specs directory and should be used for context.'
         : 'Use any relevant supporting specs in the specs directory for context.';
-    return `You are validating an implementation against its specification.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Read the codebase thoroughly.\n3. Compare implementation to each requirement in the spec.\n4. Identify gaps, missing features, or deviations.\n5. Rate implementation completeness (0-100%).\n6. List specific issues that must be addressed.\n\n${contextHint}\n\nIMPLEMENTATION (current codebase):\n${codebaseContent}\n\nReturn ONLY the following response format block and nothing else:\nCOMPLETENESS: {percentage}%\nSTATUS: {PASS|FAIL}\nGAPS:\n- {gap_1}\n- {gap_2}\nRECOMMENDATIONS:\n- {recommendation_1}`;
+    return `You are validating an implementation against its specification.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Read the codebase thoroughly.\n3. Compare implementation to each requirement in the spec.\n4. Identify gaps, missing features, or deviations.\n5. Rate implementation completeness (0-100%).\n6. List specific issues that must be addressed.\n\n${contextHint}\n\nIMPLEMENTATION (current codebase):\n${codebaseContent}\n\nSTRICT OUTPUT REQUIRED: Return ONLY a single JSON object with exactly one key named "response_block".\nThe value must be ONLY the following response format block and nothing else.\nCOMPLETENESS: {percentage}%\nSTATUS: {PASS|FAIL}\nGAPS:\n- {gap_1}\n- {gap_2}\nRECOMMENDATIONS:\n- {recommendation_1}`;
 }
 async function readCodebaseContent(cwd) {
     const files = await listFilesRecursive(cwd, {
@@ -365,27 +408,35 @@ async function readCodebaseContent(cwd) {
     return chunks.join('\n\n');
 }
 function toValidation(tool, prompt, result) {
+    let parsed;
+    try {
+        parsed = parseValidationOutput(result.output);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Validator ${tool} output invalid: ${message}`);
+    }
     return {
         tool: tool,
         prompt,
         output: result.output,
-        parsed: parseValidationOutput(result.output),
+        parsed,
         durationMs: result.durationMs,
         exitCode: result.exitCode
     };
 }
 export function parseValidationOutput(output) {
-    const cleanedOutput = stripTrailingResponseTemplate(output);
+    const cleanedOutput = stripTrailingResponseTemplate(extractResponseBlock(output));
     const completenessMatch = cleanedOutput.match(/COMPLETENESS:\s*(\d+)%/i);
     const statusMatch = cleanedOutput.match(/STATUS:\s*(PASS|FAIL)/i);
-    const completeness = completenessMatch ? Number(completenessMatch[1]) : 0;
-    const status = statusMatch
-        ? statusMatch[1].toUpperCase()
-        : inferStatus(cleanedOutput);
-    const normalizedCompleteness = completeness > 0 ? completeness : status === 'PASS' ? 100 : 0;
+    if (!completenessMatch || !statusMatch) {
+        throw new Error('Validator output missing required response format (COMPLETENESS/STATUS).');
+    }
+    const completeness = Number(completenessMatch[1]);
+    const status = statusMatch[1].toUpperCase();
     const gaps = extractBullets(cleanedOutput, 'GAPS:');
     const recommendations = extractBullets(cleanedOutput, 'RECOMMENDATIONS:');
-    return { completeness: normalizedCompleteness, status, gaps, recommendations };
+    return { completeness, status, gaps, recommendations };
 }
 function extractBullets(output, section) {
     const index = output.toUpperCase().indexOf(section.toUpperCase());
@@ -405,25 +456,47 @@ function extractBullets(output, section) {
     }
     return items;
 }
-function inferStatus(output) {
-    const lower = output.toLowerCase();
-    if (/(^|\b)(fail|failed|failing)\b/.test(lower)) {
-        return 'FAIL';
-    }
-    if (/(^|\b)(pass|passed|passing)\b/.test(lower)) {
-        return 'PASS';
-    }
-    if (lower.includes('all tests passing') || lower.includes('session complete')) {
-        return 'PASS';
-    }
-    return 'FAIL';
-}
+// Strict parsing enforced; missing fields should error out.
 function stripTrailingResponseTemplate(output) {
     const index = output.toLowerCase().indexOf('response format:');
     if (index === -1) {
         return output;
     }
     return output.slice(0, index).trim();
+}
+function extractResponseBlock(output) {
+    const trimmed = output.trim();
+    if (!trimmed) {
+        return output;
+    }
+    if (!trimmed.startsWith('{')) {
+        return output;
+    }
+    try {
+        const parsed = JSON.parse(trimmed);
+        if (typeof parsed.response_block === 'string') {
+            return parsed.response_block;
+        }
+        const content = parsed.content;
+        if (Array.isArray(content)) {
+            const text = content
+                .map((item) => (item && typeof item === 'object' && 'text' in item ? String(item.text) : ''))
+                .join('');
+            if (text.trim()) {
+                return text;
+            }
+        }
+        if (typeof content === 'string' && content.trim()) {
+            return content;
+        }
+        if (typeof parsed.text === 'string' && parsed.text.trim()) {
+            return parsed.text;
+        }
+    }
+    catch {
+        // Not JSON; fall through to raw output.
+    }
+    return output;
 }
 function looksLikeText(content) {
     if (content.includes('\u0000')) {
@@ -594,6 +667,10 @@ async function ensureSandboxAvailable() {
 function buildValidationReportPath(cwd, sessionId, specId, cycleNumber, tool) {
     const safeSpec = specId.replace(/[^a-z0-9-_]/gi, '_');
     return path.join(getProjectReportsDir(cwd), `${sessionId}-${safeSpec}-cycle-${cycleNumber}-${tool}.md`);
+}
+function buildLeadReportPath(cwd, sessionId, specId, cycleNumber, tool) {
+    const safeSpec = specId.replace(/[^a-z0-9-_]/gi, '_');
+    return path.join(getProjectReportsDir(cwd), `${sessionId}-${safeSpec}-cycle-${cycleNumber}-${tool}-lead.md`);
 }
 async function getPreviousReportFiles(cwd, sessionId, specId, cycleNumber, validators) {
     if (cycleNumber < 1) {

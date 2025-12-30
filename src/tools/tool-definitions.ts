@@ -11,20 +11,20 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'claude',
     command: 'claude',
-    leadArgs: ['--dangerously-skip-permissions', '-p'],
-    validatorArgs: ['--allowedTools', 'View,Read,Grep,Glob,LS', '-p']
+    leadArgs: ['--dangerously-skip-permissions', '-p', '--output-format', 'json'],
+    validatorArgs: ['--allowedTools', 'View,Read,Grep,Glob,LS', '-p', '--output-format', 'json']
   },
   {
     name: 'codex',
     command: 'codex',
-    leadArgs: ['--approval-mode', 'full-auto'],
-    validatorArgs: ['--approval-mode', 'read-only']
+    leadArgs: ['exec', '--color', 'never', '--full-auto', '--json'],
+    validatorArgs: ['exec', '--color', 'never', '--json']
   },
   {
     name: 'gemini',
     command: 'gemini',
-    leadArgs: ['--non-interactive', 'prompt'],
-    validatorArgs: ['--non-interactive', '--read-only', 'prompt']
+    leadArgs: ['-p', '--output-format', 'json'],
+    validatorArgs: ['-p', '--output-format', 'json', '--read-only']
   }
 ];
 

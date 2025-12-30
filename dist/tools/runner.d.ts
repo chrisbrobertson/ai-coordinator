@@ -8,6 +8,7 @@ export interface RunnerConfig {
     verbose: boolean;
     output: NodeJS.WritableStream;
     inheritStdin: boolean;
+    env?: NodeJS.ProcessEnv;
     onSpawn?: (info: {
         child: ReturnType<typeof execa>;
         command: string;
