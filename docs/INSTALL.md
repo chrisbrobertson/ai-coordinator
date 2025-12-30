@@ -43,6 +43,30 @@ aic run [options]
 aic status [--full]
 ```
 
+## How Specs Are Processed
+- Specs are discovered from `./specs/*.md` with valid Spec-MAS front matter.
+- Files named `system-*.md` are context-only and not built directly.
+- Feature specs are ordered by `depends_on`/`dependsOn` (then filename).
+- Each spec runs to consensus or `--max-iterations` before advancing.
+
+## Where Output Goes
+- Project sessions/reports/logs: `./.ai-coord/`
+- Global state: `~/.ai-spec-coordinator/` (do not commit)
+
 ## Troubleshooting
 - If aic/ai-coord are not found, ensure npm global bin is on PATH.
 - Tool detection requires at least two AI CLIs installed (claude, codex, gemini).
+- `aic tools` shows which CLIs are detected and which are missing.
+- Permission/auth errors often mean the CLI tool needs login (e.g., `claude /login`).
+- If the run fails early, inspect `./.ai-coord/logs/<session>.log`.
+- Validators output is stored in `./.ai-coord/reports/` for each cycle.
+- If consensus is not reached, rerun with higher `--max-iterations` or fix gaps first.
+- For more signal, run with `--verbose --heartbeat 5`.
+- If `--resume` fails, remove `./.ai-coord/session` to start a fresh run.
+- Sandbox issues: ensure Docker is running and `AIC_SANDBOX_IMAGE` is set if needed.
+- Timeouts: increase `--timeout` (minutes) for large specs or slow tools.
+
+## Next Steps
+- Run `aic init` to create a starter spec.
+- Use `aic run --dry-run` to preview ordered specs before executing.
+- See `docs/EXAMPLES.md` and `docs/DEBUGGING.md` for walkthroughs.

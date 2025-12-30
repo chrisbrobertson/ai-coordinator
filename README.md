@@ -35,6 +35,37 @@ npx aic init
 npx aic run
 ```
 
+## How It Works
+1. Discover specs in `./specs/` with Spec-MAS front matter.
+2. Order feature specs by `depends_on`/`dependsOn` (context-only `system-*.md` are prepended).
+3. For each spec:
+   - Lead tool implements the spec.
+   - Validator tools review and report gaps.
+   - Repeat until consensus or `--max-iterations`.
+4. Reports and session state are written under `./.ai-coord/`.
+
+## How Specs Are Processed
+- Specs are discovered from `./specs/*.md` with valid Spec-MAS front matter.
+- Files starting with `system-` are treated as context-only and not built directly.
+- Feature specs are ordered by `depends_on`/`dependsOn` in front matter, then filename.
+- Each spec runs to consensus or `--max-iterations` before moving to the next spec.
+
+## Where Output Goes
+- Project state, reports, and sessions are stored under `./.ai-coord/`.
+- Global state lives in `~/.ai-spec-coordinator/` and should not be committed.
+
+## Quick Troubleshooting
+- Tools not found? Run `aic tools` and confirm CLI tools are on PATH.
+- Need more detail? Use `--verbose --heartbeat 5`.
+- Stuck or failing cycles? Check reports and logs in `./.ai-coord/`.
+
+## Docs
+- `docs/INSTALL.md`
+- `docs/DEBUGGING.md`
+- `docs/EXAMPLES.md`
+- `docs/ARCHITECTURE.md`
+- `docs/SESSION_STATE.md`
+
 ## Commands
 ```bash
 aic run [options]

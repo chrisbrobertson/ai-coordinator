@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.ai-coord/
+.DS_Store
+*.log
+*.tmp
+.vite/
+node_modules/.vite/
+tests/ai-code-test-spec/
+tests/e2e/
+tests/integration/
