@@ -37,6 +37,7 @@ npx aic run
 
 ## How It Works
 1. Discover specs in `./specs/` with Spec-MAS front matter.
+   - Front matter must start at the first line (`---` at byte 0).
 2. Order feature specs by `depends_on`/`dependsOn` (context-only `system-*.md` are prepended).
 3. For each spec:
    - Lead tool implements the spec.

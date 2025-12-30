@@ -19,6 +19,8 @@ maturity: 3
 - Add a CLI command that prints "Hello, world".
 ```
 
+Front matter must start at the first line (`---` at byte 0) or the spec will be ignored.
+
 Run:
 ```bash
 aic run
