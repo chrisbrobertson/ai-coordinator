@@ -4,6 +4,7 @@
 - `--verbose` streams tool output as it runs.
 - `--heartbeat <seconds>` prints periodic heartbeat lines in verbose mode.
 - `--quiet` minimizes output (useful for CI logs).
+- Preflight validation can be disabled with `--no-preflight`.
 
 Example:
 ```bash

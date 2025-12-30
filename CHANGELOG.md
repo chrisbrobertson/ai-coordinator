@@ -1,5 +1,6 @@
 # Changelog
 
 ## Unreleased
-- Docs: added debugging, examples, architecture, and session state guides.
-- Docs: expanded README and installation troubleshooting.
+
+## 0.8.0
+- Alpha testing ready milestone.

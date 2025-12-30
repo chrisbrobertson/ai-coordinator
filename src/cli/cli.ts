@@ -63,6 +63,8 @@ export async function runCli(options: CliRunOptions): Promise<void> {
     .option('--validators <tools>', 'Comma-separated list of validator tools')
     .option('--max-iterations <n>', 'Max cycles per spec', Number, 5)
     .option('--timeout <minutes>', 'Per-cycle timeout in minutes', Number, 10)
+    .option('--preflight-threshold <n>', 'Preflight completeness threshold (0-100)', Number, 70)
+    .option('--preflight-iterations <n>', 'Max validation cycles in preflight mode', Number, 2)
     .option('--resume', 'Resume last session')
     .option('--stop-on-failure', 'Stop on first spec failure')
     .option('--lead-permissions <list>', 'Override lead permissions')
@@ -72,6 +74,7 @@ export async function runCli(options: CliRunOptions): Promise<void> {
     .option('--heartbeat <seconds>', 'Verbose heartbeat interval in seconds (0 to disable)', Number, 0)
     .option('--quiet', 'Quiet output')
     .option('--dry-run', 'List specs and exit')
+    .option('--no-preflight', 'Disable preflight validation on existing code')
     .action(handleRun);
 
   program.command('tools')

@@ -62,7 +62,10 @@ describe('SIGINT handling', () => {
       verbose: false,
       heartbeat: 0,
       quiet: true,
-      dryRun: false
+      dryRun: false,
+      preflight: true,
+      preflightThreshold: 70,
+      preflightIterations: 2
     };
 
     const runner = new HangingRunner();

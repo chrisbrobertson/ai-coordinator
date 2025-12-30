@@ -86,6 +86,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       throw new Error('No session to resume');
     }
   } else {
+    const completedSpecs = await loadCompletedSpecKeys(cwd);
     session = await createSession({
       cwd,
       specs: entries,
@@ -98,7 +99,10 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         sandbox: options.sandbox,
         stopOnFailure: options.stopOnFailure,
         verbose: options.verbose,
-        quiet: options.quiet
+        quiet: options.quiet,
+        preflight: options.preflight,
+        preflightThreshold: options.preflightThreshold,
+        preflightIterations: options.preflightIterations
       },
       env: context.env
     });
@@ -188,6 +192,9 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
   process.on('SIGINT', handleSigint);
   process.on('SIGTERM', handleSigint);
 
+  const completedSpecs = options.resume ? new Set<string>() : await loadCompletedSpecKeys(cwd);
+  const hasCodeArtifacts = await hasImplementationArtifacts(cwd);
+
   for (let i = session.currentSpecIndex; i < session.specs.length; i += 1) {
     const specEntry = session.specs[i];
     session.currentSpecIndex = i;
@@ -205,8 +212,53 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
     specEntry.startedAt = new Date().toISOString();
     await persistSession(session, context.env);
     let validationFeedback = '';
+    let validateOnly = false;
+    let validationIterations = iterations;
 
-    for (let cycleNumber = 1; cycleNumber <= iterations; cycleNumber += 1) {
+    const wasCompleted = completedSpecs.has(specEntry.meta.id) || completedSpecs.has(specEntry.file);
+    if (options.preflight && (hasCodeArtifacts || wasCompleted)) {
+      if (!options.quiet) {
+        output.write(`Preflight validation for ${specEntry.file}...\n`);
+      }
+      const validationPrompt = await buildValidationPrompt(specContent, contextDocs, cwd, specEntry.file);
+      const validations = await runValidationPass({
+        cycleNumber: 0,
+        specEntry,
+        session,
+        validationPrompt,
+        roleAssignment,
+        runner,
+        cwd,
+        timeoutMs: options.timeout * 60_000,
+        output,
+        options,
+        onProcessComplete: () => {
+          activeProcess = null;
+          if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+          }
+        }
+      });
+      const consensus = hasConsensus(validations.map((validation) => validation.parsed));
+      const avgCompleteness = Math.round(
+        validations.reduce((sum, validation) => sum + validation.parsed.completeness, 0) / Math.max(validations.length, 1)
+      );
+      if (consensus || avgCompleteness >= options.preflightThreshold) {
+        validateOnly = true;
+        validationIterations = Math.min(options.preflightIterations, iterations);
+        if (consensus) {
+          specEntry.status = 'completed';
+          specEntry.completedAt = new Date().toISOString();
+          await persistSession(session, context.env);
+          output.write(chalk.green(`Consensus reached for ${specEntry.file}.\n`));
+          continue;
+        }
+        validationFeedback = buildValidationFeedback(validations);
+      }
+    }
+
+    for (let cycleNumber = 1; cycleNumber <= validationIterations; cycleNumber += 1) {
       const cycleStart = new Date().toISOString();
       const previousReports = await getPreviousReportFiles(
         cwd,
@@ -215,36 +267,45 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         cycleNumber - 1,
         roleAssignment.validators
       );
-      const leadPrompt = buildLeadPrompt(
-        specContent,
-        contextDocs,
-        validationFeedback,
-        await summarizeCodebase(cwd),
-        specEntry.file,
-        previousReports
-      );
+      let leadResult = {
+        output: 'Lead skipped: validation-only mode.',
+        exitCode: 0,
+        durationMs: 0,
+        streamed: false
+      };
+      let leadPrompt = '';
+      if (!validateOnly) {
+        leadPrompt = buildLeadPrompt(
+          specContent,
+          contextDocs,
+          validationFeedback,
+          await summarizeCodebase(cwd),
+          specEntry.file,
+          previousReports
+        );
 
-      spinner.start(`Cycle ${cycleNumber}/${iterations}: Lead implementing ${specEntry.file}`);
-      if (options.verbose) {
-        output.write(`[lead:${roleAssignment.lead}] starting\n`);
-      }
-      const leadResult = await runLeadWithRetry(runner, roleAssignment.lead, leadPrompt, cwd, options.timeout * 60_000);
-      spinner.stop();
-      activeProcess = null;
-      if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-        heartbeatTimer = null;
-      }
-      if (options.verbose && !leadResult.streamed && leadResult.output) {
-        output.write(`${leadResult.output}\n`);
-      }
-      if (!leadResult.output || leadResult.output.trim().length === 0) {
-        throw new Error(`Lead tool ${roleAssignment.lead} returned no output.`);
-      }
-      const leadReportPath = buildLeadReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, roleAssignment.lead);
-      await writeTextFile(leadReportPath, leadResult.output || 'No output captured.');
-      if (options.verbose) {
-        output.write(`[report] ${leadReportPath}\n`);
+        spinner.start(`Cycle ${cycleNumber}/${validationIterations}: Lead implementing ${specEntry.file}`);
+        if (options.verbose) {
+          output.write(`[lead:${roleAssignment.lead}] starting\n`);
+        }
+        leadResult = await runLeadWithRetry(runner, roleAssignment.lead, leadPrompt, cwd, options.timeout * 60_000);
+        spinner.stop();
+        activeProcess = null;
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        if (options.verbose && !leadResult.streamed && leadResult.output) {
+          output.write(`${leadResult.output}\n`);
+        }
+        if (!leadResult.output || leadResult.output.trim().length === 0) {
+          throw new Error(`Lead tool ${roleAssignment.lead} returned no output.`);
+        }
+        const leadReportPath = buildLeadReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, roleAssignment.lead);
+        await writeTextFile(leadReportPath, leadResult.output || 'No output captured.');
+        if (options.verbose) {
+          output.write(`[report] ${leadReportPath}\n`);
+        }
       }
       if (interrupted) {
         await persistSession(session, context.env);
@@ -275,35 +336,25 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       }
 
       const validationPrompt = await buildValidationPrompt(specContent, contextDocs, cwd, specEntry.file);
-      const validationSpinner = ora({ isEnabled: false });
-      validationSpinner.start(`Cycle ${cycleNumber}/${iterations}: Validators running`);
-      await ensureDir(getProjectReportsDir(cwd));
-      const validations = await Promise.all(
-        roleAssignment.validators.map(async (tool) => {
-          if (options.verbose) {
-            output.write(`[validator:${tool}] starting\n`);
-          }
-          const result = await runner.runValidator(tool, validationPrompt, cwd, options.timeout * 60_000);
+      const validations = await runValidationPass({
+        cycleNumber,
+        specEntry,
+        session,
+        validationPrompt,
+        roleAssignment,
+        runner,
+        cwd,
+        timeoutMs: options.timeout * 60_000,
+        output,
+        options,
+        onProcessComplete: () => {
           activeProcess = null;
           if (heartbeatTimer) {
             clearInterval(heartbeatTimer);
             heartbeatTimer = null;
           }
-          if (options.verbose && !result.streamed && result.output) {
-            output.write(`${result.output}\n`);
-          }
-          const reportPath = buildValidationReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, tool);
-          await writeTextFile(reportPath, result.output || 'No output captured.');
-          if (options.verbose) {
-            output.write(`[report] ${reportPath}\n`);
-          }
-          if (interrupted) {
-            return toValidation(tool, validationPrompt, result);
-          }
-          return toValidation(tool, validationPrompt, result);
-        })
-      );
-      validationSpinner.stop();
+        }
+      });
 
       if (options.verbose) {
         validations.forEach((validation) => {
@@ -363,7 +414,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         break;
       }
 
-      if (cycleNumber === iterations) {
+      if (cycleNumber === validationIterations) {
         specEntry.status = 'failed';
         output.write(chalk.yellow(`Max iterations reached for ${specEntry.file}.\n`));
         if (session.config.stopOnFailure) {
@@ -747,6 +798,88 @@ async function ensureSandboxAvailable(): Promise<void> {
   } catch {
     throw new Error('Sandbox mode requires Docker to be installed and available on PATH.');
   }
+}
+
+async function loadCompletedSpecKeys(cwd: string): Promise<Set<string>> {
+  const completed = new Set<string>();
+  const sessionsDir = getProjectSessionsDir(cwd);
+  if (!(await pathExists(sessionsDir))) {
+    return completed;
+  }
+  const files = await fs.readdir(sessionsDir);
+  for (const file of files) {
+    if (!file.endsWith('.json')) {
+      continue;
+    }
+    try {
+      const content = await fs.readFile(path.join(sessionsDir, file), 'utf8');
+      const parsed = JSON.parse(content) as { specs?: Array<{ status?: string; meta?: { id?: string }; file?: string }> };
+      for (const spec of parsed.specs ?? []) {
+        if (spec.status === 'completed') {
+          if (spec.meta?.id) {
+            completed.add(spec.meta.id);
+          }
+          if (spec.file) {
+            completed.add(spec.file);
+          }
+        }
+      }
+    } catch {
+      // Ignore unreadable session files.
+    }
+  }
+  return completed;
+}
+
+async function hasImplementationArtifacts(cwd: string): Promise<boolean> {
+  const files = await listFilesRecursive(cwd, {
+    excludeDirs: ['node_modules', 'dist', '.git', '.ai-coord', 'specs', 'data'],
+    limit: 5
+  });
+  return files.length > 0;
+}
+
+async function runValidationPass(input: {
+  cycleNumber: number;
+  specEntry: SpecEntry;
+  session: Session;
+  validationPrompt: string;
+  roleAssignment: { validators: ToolName[] };
+  runner: ToolRunner;
+  cwd: string;
+  timeoutMs: number;
+  output: NodeJS.WritableStream;
+  options: RunOptions;
+  onProcessComplete?: () => void;
+}): Promise<Validation[]> {
+  const validationSpinner = ora({ isEnabled: false });
+  const label = input.cycleNumber === 0
+    ? 'Preflight: Validators running'
+    : `Cycle ${input.cycleNumber}/${input.session.config.maxIterations}: Validators running`;
+  validationSpinner.start(label);
+  await ensureDir(getProjectReportsDir(input.cwd));
+  const validations = await Promise.all(
+    input.roleAssignment.validators.map(async (tool) => {
+      if (input.options.verbose) {
+        input.output.write(`[validator:${tool}] starting\n`);
+      }
+      const result = await input.runner.runValidator(tool, input.validationPrompt, input.cwd, input.timeoutMs);
+      if (input.options.verbose && !result.streamed && result.output) {
+        input.output.write(`${result.output}\n`);
+      }
+      if (input.onProcessComplete) {
+        input.onProcessComplete();
+      }
+      const reportPath = buildValidationReportPath(input.cwd, input.session.id, input.specEntry.meta.id, input.cycleNumber, tool);
+      await writeTextFile(reportPath, result.output || 'No output captured.');
+      if (input.options.verbose) {
+        input.output.write(`[report] ${reportPath}\n`);
+      }
+      return toValidation(tool, input.validationPrompt, result);
+    })
+  );
+  validationSpinner.stop();
+  return validations;
 }
 
 function buildValidationReportPath(cwd: string, sessionId: string, specId: string, cycleNumber: number, tool: string): string {

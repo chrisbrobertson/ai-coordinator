@@ -49,7 +49,10 @@ describe('runCoordinator integration', () => {
       interactive: false,
       verbose: false,
       quiet: true,
-      dryRun: false
+      dryRun: false,
+      preflight: true,
+      preflightThreshold: 70,
+      preflightIterations: 2
     };
 
     await runCoordinator(options, {

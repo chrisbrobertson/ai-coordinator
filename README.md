@@ -86,6 +86,8 @@ aic clean
 --validators <tools>    # Comma-separated list of validator tools
 --max-iterations <n>    # Max cycles per spec (default: 5)
 --timeout <minutes>     # Per-cycle timeout in minutes (default: 10)
+--preflight-threshold <n> # Preflight completeness threshold (default: 70)
+--preflight-iterations <n> # Max validation cycles in preflight mode (default: 2)
 --resume                # Resume last session
 --stop-on-failure       # Stop on first spec failure
 --lead-permissions <list> # Override lead permissions (Claude only)
@@ -95,6 +97,7 @@ aic clean
 --heartbeat <seconds>   # Verbose heartbeat interval (0 disables)
 --quiet                 # Minimal output
 --dry-run               # List specs and exit
+--no-preflight          # Disable preflight validation on existing code
 ```
 
 ## Status Options

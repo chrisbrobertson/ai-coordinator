@@ -38,6 +38,9 @@ export interface SessionConfig {
   stopOnFailure: boolean;
   verbose: boolean;
   quiet: boolean;
+  preflight: boolean;
+  preflightThreshold: number;
+  preflightIterations: number;
 }
 
 export interface Session {
@@ -109,6 +112,9 @@ export interface RunOptions {
   heartbeat: number;
   quiet: boolean;
   dryRun: boolean;
+  preflight: boolean;
+  preflightThreshold: number;
+  preflightIterations: number;
 }
 
 export interface RunContext {
