@@ -229,6 +229,9 @@ function formatSessionSummary(session) {
     const completed = session.specs.filter((spec) => spec.status === 'completed').length;
     const failed = session.specs.filter((spec) => spec.status === 'failed').length;
     const inProgress = session.specs.filter((spec) => spec.status === 'in_progress').length;
+    const pendingSpecs = session.specs
+        .filter((spec) => spec.status !== 'completed' && spec.status !== 'skipped')
+        .map((spec) => spec.file);
     const activeSpec = session.specs.find((spec) => spec.status === 'in_progress')?.file ?? 'None';
     const lastError = session.specs.find((spec) => spec.lastError)?.lastError;
     const lines = [
@@ -243,6 +246,14 @@ function formatSessionSummary(session) {
     ];
     if (lastError) {
         lines.splice(6, 0, `Last Error: ${lastError}`);
+    }
+    if (pendingSpecs.length > 0) {
+        lines.push(`Pending Specs: ${pendingSpecs.join(', ')}`);
+        lines.push('');
+    }
+    if (session.status !== 'completed') {
+        lines.push('Resume: aic run (or start over with --start-over)');
+        lines.push('');
     }
     return `${lines.join('\n')}\n`;
 }

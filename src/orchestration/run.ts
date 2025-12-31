@@ -1020,7 +1020,7 @@ async function runValidationPass(input: {
             output: result.output,
             parsed: {
               completeness: 0,
-              status: 'FAIL',
+              status: 'FAIL' as const,
               gaps: [`Validator output invalid after retry: ${retryMessage}`],
               recommendations: ['Re-run validator or inspect logs for tool output formatting issues.']
             },

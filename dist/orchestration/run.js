@@ -853,7 +853,7 @@ async function runValidationPass(input) {
         if (input.options.verbose) {
             input.output.write(`[validator:${tool}] starting\n`);
         }
-        const result = await input.runner.runValidator(tool, input.validationPrompt, input.cwd, input.timeoutMs);
+        let result = await input.runner.runValidator(tool, input.validationPrompt, input.cwd, input.timeoutMs);
         if (input.options.verbose && !result.streamed && result.output) {
             input.output.write(`${result.output}\n`);
         }
@@ -861,14 +861,73 @@ async function runValidationPass(input) {
             input.onProcessComplete();
         }
         const reportPath = buildValidationReportPath(input.cwd, input.session.id, input.specEntry.meta.id, input.cycleNumber, tool);
-        await writeTextFile(reportPath, result.output || 'No output captured.');
-        if (input.options.verbose) {
-            input.output.write(`[report] ${reportPath}\n`);
+        try {
+            const validation = toValidation(tool, input.validationPrompt, result);
+            await writeTextFile(reportPath, result.output || 'No output captured.');
+            if (input.options.verbose) {
+                input.output.write(`[report] ${reportPath}\n`);
+            }
+            return validation;
         }
-        return toValidation(tool, input.validationPrompt, result);
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!message.includes('Validator output missing required response format')) {
+                await writeTextFile(reportPath, result.output || 'No output captured.');
+                if (input.options.verbose) {
+                    input.output.write(`[report] ${reportPath}\n`);
+                }
+                throw error;
+            }
+            const retryPrompt = buildValidationRetryPrompt(input.validationPrompt);
+            if (input.options.verbose) {
+                input.output.write(`[validator:${tool}] retrying with format recovery\n`);
+            }
+            result = await input.runner.runValidator(tool, retryPrompt, input.cwd, input.timeoutMs);
+            if (input.options.verbose && !result.streamed && result.output) {
+                input.output.write(`${result.output}\n`);
+            }
+            if (input.onProcessComplete) {
+                input.onProcessComplete();
+            }
+            try {
+                const validation = toValidation(tool, retryPrompt, result);
+                await writeTextFile(reportPath, result.output || 'No output captured.');
+                if (input.options.verbose) {
+                    input.output.write(`[report] ${reportPath}\n`);
+                }
+                return validation;
+            }
+            catch (retryError) {
+                const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+                const fallbackOutput = [
+                    result.output || 'No output captured.',
+                    `ERROR: Validator output invalid after retry: ${retryMessage}`
+                ].join('\n');
+                await writeTextFile(reportPath, fallbackOutput);
+                if (input.options.verbose) {
+                    input.output.write(`[report] ${reportPath}\n`);
+                }
+                return {
+                    tool,
+                    prompt: retryPrompt,
+                    output: result.output,
+                    parsed: {
+                        completeness: 0,
+                        status: 'FAIL',
+                        gaps: [`Validator output invalid after retry: ${retryMessage}`],
+                        recommendations: ['Re-run validator or inspect logs for tool output formatting issues.']
+                    },
+                    durationMs: result.durationMs,
+                    exitCode: result.exitCode
+                };
+            }
+        }
     }));
     validationSpinner.stop();
     return validations;
+}
+function buildValidationRetryPrompt(prompt) {
+    return `${prompt}\n\nFORMAT RECOVERY: You must return ONLY JSON with one key \"response_block\".\nThe value must be ONLY the response format block (COMPLETENESS/STATUS/GAPS/RECOMMENDATIONS).`;
 }
 function buildValidationReportPath(cwd, sessionId, specId, cycleNumber, tool) {
     const safeSpec = specId.replace(/[^a-z0-9-_]/gi, '_');
