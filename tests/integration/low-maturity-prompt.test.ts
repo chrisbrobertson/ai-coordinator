@@ -68,7 +68,8 @@ describe('low maturity prompt', () => {
       dryRun: false,
       preflight: true,
       preflightThreshold: 70,
-      preflightIterations: 2
+      preflightIterations: 2,
+      startOver: false
     };
 
     const out = createOutputBuffer();
@@ -119,7 +120,8 @@ describe('low maturity prompt', () => {
       dryRun: false,
       preflight: true,
       preflightThreshold: 70,
-      preflightIterations: 2
+      preflightIterations: 2,
+      startOver: false
     };
 
     const out = createOutputBuffer();

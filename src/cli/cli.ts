@@ -74,6 +74,7 @@ export async function runCli(options: CliRunOptions): Promise<void> {
     .option('--heartbeat <seconds>', 'Verbose heartbeat interval in seconds (0 to disable)', Number, 0)
     .option('--quiet', 'Quiet output')
     .option('--dry-run', 'List specs and exit')
+    .option('--start-over', 'Ignore previous session state and start fresh')
     .option('--no-preflight', 'Disable preflight validation on existing code')
     .action(handleRun);
 

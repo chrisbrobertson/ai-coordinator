@@ -86,6 +86,21 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       throw new Error('No session to resume');
     }
   } else {
+    const priorSession = await loadSession(cwd, context.env);
+    if (priorSession && needsResume(priorSession)) {
+      if (options.startOver) {
+        await fs.rm(path.join(cwd, PROJECT_SESSION_FILE), { force: true });
+      } else {
+        const shouldResume = testMode ? true : await confirmResume();
+        if (shouldResume) {
+          session = priorSession;
+        } else {
+          await fs.rm(path.join(cwd, PROJECT_SESSION_FILE), { force: true });
+        }
+      }
+    }
+  }
+  if (!session) {
     const completedSpecs = await loadCompletedSpecKeys(cwd);
     session = await createSession({
       cwd,
@@ -267,6 +282,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         cycleNumber - 1,
         roleAssignment.validators
       );
+      const historicalReports = await getRecentReportSummaries(cwd, specEntry.meta.id, 6);
       let leadResult = {
         output: 'Lead skipped: validation-only mode.',
         exitCode: 0,
@@ -281,7 +297,8 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
           validationFeedback,
           await summarizeCodebase(cwd),
           specEntry.file,
-          previousReports
+          previousReports,
+          historicalReports
         );
 
         spinner.start(`Cycle ${cycleNumber}/${validationIterations}: Lead implementing ${specEntry.file}`);
@@ -308,13 +325,30 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
           `Check logs: ${path.join('.ai-coord', 'logs', `${session.id}.log`)}`
         ].join(' ');
         specEntry.status = 'failed';
+        specEntry.completedAt = new Date().toISOString();
         specEntry.lastError = leadFailureMessage;
+        session.status = 'partial';
         await writeTextFile(leadReportPath, leadFailureMessage);
         await persistSession(session, context.env);
+        await generateReport(session, context.env);
         logger.error(
           { cycle: cycleNumber, tool: roleAssignment.lead, exitCode: leadResult.exitCode, durationMs: leadResult.durationMs },
           leadFailureMessage
         );
+        process.off('SIGINT', handleSigint);
+        process.off('SIGTERM', handleSigint);
+        if (process.stdin.readable) {
+          process.stdin.off('data', handleStdin);
+          process.stdin.pause();
+        }
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        if (exitTimer) {
+          clearTimeout(exitTimer);
+          exitTimer = null;
+        }
         throw new Error(leadFailureMessage);
       }
       await writeTextFile(leadReportPath, leadResult.output || 'No output captured.');
@@ -499,7 +533,8 @@ function buildLeadPrompt(
   validationFeedback: string,
   codebaseSummary: string,
   specFile: string,
-  reportFiles: string[]
+  reportFiles: string[],
+  reportSummaries: string
 ): string {
   const contextHint = contextDocs.length > 0
     ? 'System/architecture specs are present in the specs directory and should be used for context.'
@@ -507,7 +542,10 @@ function buildLeadPrompt(
   const reportSection = reportFiles.length > 0
     ? `\n\nPrevious validation reports:\n${reportFiles.map((file) => `- ${file}`).join('\n')}`
     : '';
-  return `You are implementing a feature defined in the project specs.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Implement the requirements in that spec.\n3. Follow the acceptance criteria precisely.\n4. Address any gaps identified in previous validation feedback.\n5. Explain significant implementation decisions.\n\n${contextHint}${reportSection}\n\nCURRENT CODEBASE STATE (summary):\n${codebaseSummary}\n\nPREVIOUS VALIDATION FEEDBACK (if any):\n${validationFeedback}`;
+  const reportContentSection = reportSummaries
+    ? `\n\nPREVIOUS REPORT CONTENT (most recent first):\n${reportSummaries}`
+    : '';
+  return `You are implementing a feature defined in the project specs.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Implement the requirements in that spec.\n3. Follow the acceptance criteria precisely.\n4. Address any gaps identified in previous validation feedback.\n5. Review prior execution/validation reports and avoid repeating known issues.\n6. Explain significant implementation decisions.\n\n${contextHint}${reportSection}${reportContentSection}\n\nCURRENT CODEBASE STATE (summary):\n${codebaseSummary}\n\nPREVIOUS VALIDATION FEEDBACK (if any):\n${validationFeedback}`;
 }
 
 async function buildValidationPrompt(specContent: string, contextDocs: string[], cwd: string, specFile: string): Promise<string> {
@@ -674,6 +712,9 @@ async function runLeadWithRetry(runner: ToolRunner, tool: ToolName, prompt: stri
   }
   const second = await runner.runLead(tool, prompt, cwd, timeoutMs);
   if (second.exitCode !== 0) {
+    if (!second.output || second.output.trim().length === 0) {
+      return second;
+    }
     throw new Error(`Lead execution failed after retry: ${tool}`);
   }
   return second;
@@ -815,6 +856,23 @@ async function ensureSandboxAvailable(): Promise<void> {
   }
 }
 
+function needsResume(session: Session): boolean {
+  if (session.status === 'completed') {
+    return false;
+  }
+  return session.specs.some((spec) => spec.status !== 'completed' && spec.status !== 'skipped');
+}
+
+async function confirmResume(): Promise<boolean> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  const response = await rl.question('Previous run found without consensus. Resume? [Y/n] ');
+  rl.close();
+  return response.trim().toLowerCase() !== 'n';
+}
+
 async function loadCompletedSpecKeys(cwd: string): Promise<Set<string>> {
   const completed = new Set<string>();
   const sessionsDir = getProjectSessionsDir(cwd);
@@ -852,6 +910,32 @@ async function hasImplementationArtifacts(cwd: string): Promise<boolean> {
     limit: 5
   });
   return files.length > 0;
+}
+
+async function getRecentReportSummaries(cwd: string, specId: string, limit: number): Promise<string> {
+  const reportsDir = getProjectReportsDir(cwd);
+  if (!(await pathExists(reportsDir))) {
+    return '';
+  }
+  const safeSpec = specId.replace(/[^a-z0-9-_]/gi, '_');
+  const entries = await fs.readdir(reportsDir);
+  const candidates = await Promise.all(
+    entries
+      .filter((entry) => entry.includes(`-${safeSpec}-`) && entry.endsWith('.md'))
+      .map(async (entry) => {
+        const filePath = path.join(reportsDir, entry);
+        const stat = await fs.stat(filePath);
+        return { filePath, mtimeMs: stat.mtimeMs };
+      })
+  );
+  const sorted = candidates.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, limit);
+  const summaries: string[] = [];
+  for (const entry of sorted) {
+    const content = await fs.readFile(entry.filePath, 'utf8');
+    const trimmed = content.trim().slice(0, 8000);
+    summaries.push(`# ${path.basename(entry.filePath)}\n${trimmed}`);
+  }
+  return summaries.join('\n\n');
 }
 
 async function runValidationPass(input: {

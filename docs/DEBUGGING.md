@@ -5,6 +5,7 @@
 - `--heartbeat <seconds>` prints periodic heartbeat lines in verbose mode.
 - `--quiet` minimizes output (useful for CI logs).
 - Preflight validation can be disabled with `--no-preflight`.
+- Use `--start-over` to ignore prior session state.
 
 Example:
 ```bash

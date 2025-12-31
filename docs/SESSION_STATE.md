@@ -27,6 +27,8 @@ Each cycle contains:
 ## Resuming
 - `aic run --resume` reads `./.ai-coord/session` to find the last session id.
 - If the pointer file is missing, `--resume` fails.
+- `aic run` will offer to resume if a previous run exists without consensus.
+- Use `--start-over` to ignore prior session state.
 
 ## Manual Recovery (Safe)
 1. Back up the session JSON.

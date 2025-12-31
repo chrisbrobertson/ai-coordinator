@@ -49,6 +49,7 @@ describe('cli run options', () => {
         '5',
         '--quiet',
         '--dry-run',
+        '--start-over',
         '--no-preflight'
       ],
       cwd,
@@ -77,7 +78,8 @@ describe('cli run options', () => {
       heartbeat: 5,
       quiet: true,
       dryRun: true,
-      preflight: false
+      preflight: false,
+      startOver: true
     });
   });
 });

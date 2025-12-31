@@ -97,6 +97,7 @@ aic clean
 --heartbeat <seconds>   # Verbose heartbeat interval (0 disables)
 --quiet                 # Minimal output
 --dry-run               # List specs and exit
+--start-over            # Ignore previous session state and start fresh
 --no-preflight          # Disable preflight validation on existing code
 ```
 

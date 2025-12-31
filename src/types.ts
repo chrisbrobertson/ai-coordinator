@@ -116,6 +116,7 @@ export interface RunOptions {
   preflight: boolean;
   preflightThreshold: number;
   preflightIterations: number;
+  startOver: boolean;
 }
 
 export interface RunContext {
