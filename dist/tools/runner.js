@@ -46,11 +46,8 @@ export class DefaultToolRunner {
             const needsTtyStdin = (command === 'codex' || command === 'cortex')
                 && !this.config.sandbox
                 && process.stdin.isTTY;
-            const wantsTerminal = isCodexExec && process.stdin.isTTY && process.stdout.isTTY && !this.config.sandbox;
-            const stdinMode = this.config.inheritStdin || needsTtyStdin || wantsTerminal ? 'inherit' : 'ignore';
-            const stdio = wantsTerminal
-                ? { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' }
-                : { stdin: stdinMode };
+            const stdinMode = this.config.inheritStdin || needsTtyStdin ? 'inherit' : 'ignore';
+            const stdio = { stdin: stdinMode };
             let outputFile = null;
             let schemaFile = null;
             let execArgs = args;

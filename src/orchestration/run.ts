@@ -9,7 +9,7 @@ import { assignRoles } from '../tools/roles.js';
 import { detectTools } from '../tools/registry.js';
 import { loadSpecs, orderSpecs, LoadedSpec } from '../specs/discovery.js';
 import { createSession, persistSession, completeSession, loadSession } from './session.js';
-import { getProjectLogsDir, getProjectReportsDir, getProjectSessionsDir, SPECS_DIR } from '../config/paths.js';
+import { getProjectLogsDir, getProjectReportsDir, getProjectSessionsDir, PROJECT_SESSION_FILE, SPECS_DIR } from '../config/paths.js';
 import { ensureDir, listFilesRecursive, pathExists, writeTextFile } from '../utils/fs.js';
 import { RunContext, RunOptions, SpecEntry, ToolRunner, ValidationResult, Session, Validation, ToolName } from '../types.js';
 import { createLogger } from '../utils/logger.js';

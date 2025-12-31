@@ -50,6 +50,8 @@ export async function runCli(options) {
         .option('--validators <tools>', 'Comma-separated list of validator tools')
         .option('--max-iterations <n>', 'Max cycles per spec', Number, 5)
         .option('--timeout <minutes>', 'Per-cycle timeout in minutes', Number, 10)
+        .option('--preflight-threshold <n>', 'Preflight completeness threshold (0-100)', Number, 70)
+        .option('--preflight-iterations <n>', 'Max validation cycles in preflight mode', Number, 2)
         .option('--resume', 'Resume last session')
         .option('--stop-on-failure', 'Stop on first spec failure')
         .option('--lead-permissions <list>', 'Override lead permissions')
@@ -59,6 +61,8 @@ export async function runCli(options) {
         .option('--heartbeat <seconds>', 'Verbose heartbeat interval in seconds (0 to disable)', Number, 0)
         .option('--quiet', 'Quiet output')
         .option('--dry-run', 'List specs and exit')
+        .option('--start-over', 'Ignore previous session state and start fresh')
+        .option('--no-preflight', 'Disable preflight validation on existing code')
         .action(handleRun);
     program.command('tools')
         .description('List available AI tools')
@@ -140,6 +144,8 @@ export async function runCli(options) {
             stdout.write('Previous sessions:\n');
             history.forEach((entry) => {
                 stdout.write(`- ${entry.id}: ${entry.status} (${entry.updatedAt}) - ${entry.specsSummary}\n`);
+                stdout.write(`  Project: ${entry.workingDirectory}\n`);
+                stdout.write(`  Active Spec: ${entry.activeSpec}\n`);
             });
         }
     });
@@ -193,10 +199,12 @@ export function createProgram() {
     return program;
 }
 function formatSessionStatus(session) {
+    const activeSpec = session.specs.find((spec) => spec.status === 'in_progress')?.file ?? 'None';
     const lines = [
         `Session: ${session.id}`,
         `Status: ${session.status}`,
         `Working Directory: ${session.workingDirectory}`,
+        `Active Spec: ${activeSpec}`,
         `Lead: ${session.lead}`,
         `Validators: ${session.validators.join(', ')}`,
         ''
@@ -209,6 +217,9 @@ function formatSessionStatus(session) {
             ? Math.round(lastCycle.validations.reduce((sum, validation) => sum + validation.parsed.completeness, 0) / Math.max(lastCycle.validations.length, 1))
             : 0;
         lines.push(`${index + 1}. ${spec.file} - ${spec.status} (cycles: ${cycles}, completeness: ${completeness}%)`);
+        if (spec.lastError) {
+            lines.push(`   Last error: ${spec.lastError}`);
+        }
     });
     lines.push('');
     return `${lines.join('\n')}\n`;
@@ -218,14 +229,21 @@ function formatSessionSummary(session) {
     const completed = session.specs.filter((spec) => spec.status === 'completed').length;
     const failed = session.specs.filter((spec) => spec.status === 'failed').length;
     const inProgress = session.specs.filter((spec) => spec.status === 'in_progress').length;
+    const activeSpec = session.specs.find((spec) => spec.status === 'in_progress')?.file ?? 'None';
+    const lastError = session.specs.find((spec) => spec.lastError)?.lastError;
     const lines = [
         `Session: ${session.id}`,
         `Status: ${session.status}`,
+        `Working Directory: ${session.workingDirectory}`,
+        `Active Spec: ${activeSpec}`,
         `Lead: ${session.lead}`,
         `Validators: ${session.validators.join(', ')}`,
         `Specs: ${completed}/${total} completed, ${failed} failed, ${inProgress} in progress`,
         ''
     ];
+    if (lastError) {
+        lines.splice(6, 0, `Last Error: ${lastError}`);
+    }
     return `${lines.join('\n')}\n`;
 }
 async function removeOldFiles(dirs, threshold) {
@@ -271,7 +289,15 @@ async function loadSessionHistory(cwd, excludeId) {
         const failed = parsed.specs?.filter((spec) => spec.status === 'failed').length ?? 0;
         const inProgress = parsed.specs?.filter((spec) => spec.status === 'in_progress').length ?? 0;
         const specsSummary = `${completed}/${total} completed, ${failed} failed, ${inProgress} in progress`;
-        sessions.push({ id: parsed.id, status: parsed.status, updatedAt: parsed.updatedAt, specsSummary });
+        const activeSpec = parsed.specs?.find((spec) => spec.status === 'in_progress')?.file ?? 'None';
+        sessions.push({
+            id: parsed.id,
+            status: parsed.status,
+            updatedAt: parsed.updatedAt,
+            specsSummary,
+            workingDirectory: parsed.workingDirectory ?? cwd,
+            activeSpec
+        });
     }
     sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return sessions;

@@ -22,6 +22,7 @@ export interface SpecEntry {
     startedAt?: string;
     completedAt?: string;
     contextOnly?: boolean;
+    lastError?: string;
 }
 export type SessionStatus = 'pending' | 'in_progress' | 'completed' | 'partial' | 'failed' | 'abandoned';
 export interface SessionConfig {
@@ -32,6 +33,9 @@ export interface SessionConfig {
     stopOnFailure: boolean;
     verbose: boolean;
     quiet: boolean;
+    preflight: boolean;
+    preflightThreshold: number;
+    preflightIterations: number;
 }
 export interface Session {
     id: string;
@@ -96,6 +100,10 @@ export interface RunOptions {
     heartbeat: number;
     quiet: boolean;
     dryRun: boolean;
+    preflight: boolean;
+    preflightThreshold: number;
+    preflightIterations: number;
+    startOver: boolean;
 }
 export interface RunContext {
     cwd: string;

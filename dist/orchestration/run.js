@@ -9,7 +9,7 @@ import { assignRoles } from '../tools/roles.js';
 import { detectTools } from '../tools/registry.js';
 import { loadSpecs, orderSpecs } from '../specs/discovery.js';
 import { createSession, persistSession, completeSession, loadSession } from './session.js';
-import { getProjectLogsDir, getProjectReportsDir, getProjectSessionsDir, SPECS_DIR } from '../config/paths.js';
+import { getProjectLogsDir, getProjectReportsDir, getProjectSessionsDir, PROJECT_SESSION_FILE, SPECS_DIR } from '../config/paths.js';
 import { ensureDir, listFilesRecursive, pathExists, writeTextFile } from '../utils/fs.js';
 import { createLogger } from '../utils/logger.js';
 export async function runCoordinator(options, context, deps = {}) {
@@ -66,6 +66,24 @@ export async function runCoordinator(options, context, deps = {}) {
         }
     }
     else {
+        const priorSession = await loadSession(cwd, context.env);
+        if (priorSession && needsResume(priorSession)) {
+            if (options.startOver) {
+                await fs.rm(path.join(cwd, PROJECT_SESSION_FILE), { force: true });
+            }
+            else {
+                const shouldResume = testMode ? true : await confirmResume();
+                if (shouldResume) {
+                    session = priorSession;
+                }
+                else {
+                    await fs.rm(path.join(cwd, PROJECT_SESSION_FILE), { force: true });
+                }
+            }
+        }
+    }
+    if (!session) {
+        const completedSpecs = await loadCompletedSpecKeys(cwd);
         session = await createSession({
             cwd,
             specs: entries,
@@ -78,7 +96,10 @@ export async function runCoordinator(options, context, deps = {}) {
                 sandbox: options.sandbox,
                 stopOnFailure: options.stopOnFailure,
                 verbose: options.verbose,
-                quiet: options.quiet
+                quiet: options.quiet,
+                preflight: options.preflight,
+                preflightThreshold: options.preflightThreshold,
+                preflightIterations: options.preflightIterations
             },
             env: context.env
         });
@@ -163,6 +184,8 @@ export async function runCoordinator(options, context, deps = {}) {
     }
     process.on('SIGINT', handleSigint);
     process.on('SIGTERM', handleSigint);
+    const completedSpecs = options.resume ? new Set() : await loadCompletedSpecKeys(cwd);
+    const hasCodeArtifacts = await hasImplementationArtifacts(cwd);
     for (let i = session.currentSpecIndex; i < session.specs.length; i += 1) {
         const specEntry = session.specs[i];
         session.currentSpecIndex = i;
@@ -177,31 +200,112 @@ export async function runCoordinator(options, context, deps = {}) {
         specEntry.startedAt = new Date().toISOString();
         await persistSession(session, context.env);
         let validationFeedback = '';
-        for (let cycleNumber = 1; cycleNumber <= iterations; cycleNumber += 1) {
+        let validateOnly = false;
+        let validationIterations = iterations;
+        const wasCompleted = completedSpecs.has(specEntry.meta.id) || completedSpecs.has(specEntry.file);
+        if (options.preflight && (hasCodeArtifacts || wasCompleted)) {
+            if (!options.quiet) {
+                output.write(`Preflight validation for ${specEntry.file}...\n`);
+            }
+            const validationPrompt = await buildValidationPrompt(specContent, contextDocs, cwd, specEntry.file);
+            const validations = await runValidationPass({
+                cycleNumber: 0,
+                specEntry,
+                session,
+                validationPrompt,
+                roleAssignment,
+                runner,
+                cwd,
+                timeoutMs: options.timeout * 60_000,
+                output,
+                options,
+                onProcessComplete: () => {
+                    activeProcess = null;
+                    if (heartbeatTimer) {
+                        clearInterval(heartbeatTimer);
+                        heartbeatTimer = null;
+                    }
+                }
+            });
+            const consensus = hasConsensus(validations.map((validation) => validation.parsed));
+            const avgCompleteness = Math.round(validations.reduce((sum, validation) => sum + validation.parsed.completeness, 0) / Math.max(validations.length, 1));
+            if (consensus || avgCompleteness >= options.preflightThreshold) {
+                validateOnly = true;
+                validationIterations = Math.min(options.preflightIterations, iterations);
+                if (consensus) {
+                    specEntry.status = 'completed';
+                    specEntry.completedAt = new Date().toISOString();
+                    await persistSession(session, context.env);
+                    output.write(chalk.green(`Consensus reached for ${specEntry.file}.\n`));
+                    continue;
+                }
+                validationFeedback = buildValidationFeedback(validations);
+            }
+        }
+        for (let cycleNumber = 1; cycleNumber <= validationIterations; cycleNumber += 1) {
             const cycleStart = new Date().toISOString();
             const previousReports = await getPreviousReportFiles(cwd, session.id, specEntry.meta.id, cycleNumber - 1, roleAssignment.validators);
-            const leadPrompt = buildLeadPrompt(specContent, contextDocs, validationFeedback, await summarizeCodebase(cwd), specEntry.file, previousReports);
-            spinner.start(`Cycle ${cycleNumber}/${iterations}: Lead implementing ${specEntry.file}`);
-            if (options.verbose) {
-                output.write(`[lead:${roleAssignment.lead}] starting\n`);
-            }
-            const leadResult = await runLeadWithRetry(runner, roleAssignment.lead, leadPrompt, cwd, options.timeout * 60_000);
-            spinner.stop();
-            activeProcess = null;
-            if (heartbeatTimer) {
-                clearInterval(heartbeatTimer);
-                heartbeatTimer = null;
-            }
-            if (options.verbose && !leadResult.streamed && leadResult.output) {
-                output.write(`${leadResult.output}\n`);
-            }
-            if (!leadResult.output || leadResult.output.trim().length === 0) {
-                throw new Error(`Lead tool ${roleAssignment.lead} returned no output.`);
-            }
-            const leadReportPath = buildLeadReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, roleAssignment.lead);
-            await writeTextFile(leadReportPath, leadResult.output || 'No output captured.');
-            if (options.verbose) {
-                output.write(`[report] ${leadReportPath}\n`);
+            const historicalReports = await getRecentReportSummaries(cwd, specEntry.meta.id, 6);
+            let leadResult = {
+                output: 'Lead skipped: validation-only mode.',
+                exitCode: 0,
+                durationMs: 0,
+                streamed: false
+            };
+            let leadPrompt = '';
+            if (!validateOnly) {
+                leadPrompt = buildLeadPrompt(specContent, contextDocs, validationFeedback, await summarizeCodebase(cwd), specEntry.file, previousReports, historicalReports);
+                spinner.start(`Cycle ${cycleNumber}/${validationIterations}: Lead implementing ${specEntry.file}`);
+                if (options.verbose) {
+                    output.write(`[lead:${roleAssignment.lead}] starting\n`);
+                }
+                leadResult = await runLeadWithRetry(runner, roleAssignment.lead, leadPrompt, cwd, options.timeout * 60_000);
+                spinner.stop();
+                activeProcess = null;
+                if (heartbeatTimer) {
+                    clearInterval(heartbeatTimer);
+                    heartbeatTimer = null;
+                }
+                if (options.verbose && !leadResult.streamed && leadResult.output) {
+                    output.write(`${leadResult.output}\n`);
+                }
+                const leadReportPath = buildLeadReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, roleAssignment.lead);
+                if (!leadResult.output || leadResult.output.trim().length === 0) {
+                    const durationSeconds = Math.max(1, Math.round(leadResult.durationMs / 1000));
+                    const leadFailureMessage = [
+                        `Lead tool ${roleAssignment.lead} returned no output.`,
+                        `Exit code: ${leadResult.exitCode}. Duration: ${durationSeconds}s.`,
+                        'Possible causes: system sleep, tool timeout, authentication failure, or network interruption.',
+                        `Check logs: ${path.join('.ai-coord', 'logs', `${session.id}.log`)}`
+                    ].join(' ');
+                    specEntry.status = 'failed';
+                    specEntry.completedAt = new Date().toISOString();
+                    specEntry.lastError = leadFailureMessage;
+                    session.status = 'partial';
+                    await writeTextFile(leadReportPath, leadFailureMessage);
+                    await persistSession(session, context.env);
+                    await generateReport(session, context.env);
+                    logger.error({ cycle: cycleNumber, tool: roleAssignment.lead, exitCode: leadResult.exitCode, durationMs: leadResult.durationMs }, leadFailureMessage);
+                    process.off('SIGINT', handleSigint);
+                    process.off('SIGTERM', handleSigint);
+                    if (process.stdin.readable) {
+                        process.stdin.off('data', handleStdin);
+                        process.stdin.pause();
+                    }
+                    if (heartbeatTimer) {
+                        clearInterval(heartbeatTimer);
+                        heartbeatTimer = null;
+                    }
+                    if (exitTimer) {
+                        clearTimeout(exitTimer);
+                        exitTimer = null;
+                    }
+                    throw new Error(leadFailureMessage);
+                }
+                await writeTextFile(leadReportPath, leadResult.output || 'No output captured.');
+                if (options.verbose) {
+                    output.write(`[report] ${leadReportPath}\n`);
+                }
             }
             if (interrupted) {
                 await persistSession(session, context.env);
@@ -230,33 +334,25 @@ export async function runCoordinator(options, context, deps = {}) {
                 logger.info({ cycle: cycleNumber, tool: roleAssignment.lead, output: leadResult.output }, 'Lead output');
             }
             const validationPrompt = await buildValidationPrompt(specContent, contextDocs, cwd, specEntry.file);
-            const validationSpinner = ora({ isEnabled: false });
-            validationSpinner.start(`Cycle ${cycleNumber}/${iterations}: Validators running`);
-            await ensureDir(getProjectReportsDir(cwd));
-            const validations = await Promise.all(roleAssignment.validators.map(async (tool) => {
-                if (options.verbose) {
-                    output.write(`[validator:${tool}] starting\n`);
+            const validations = await runValidationPass({
+                cycleNumber,
+                specEntry,
+                session,
+                validationPrompt,
+                roleAssignment,
+                runner,
+                cwd,
+                timeoutMs: options.timeout * 60_000,
+                output,
+                options,
+                onProcessComplete: () => {
+                    activeProcess = null;
+                    if (heartbeatTimer) {
+                        clearInterval(heartbeatTimer);
+                        heartbeatTimer = null;
+                    }
                 }
-                const result = await runner.runValidator(tool, validationPrompt, cwd, options.timeout * 60_000);
-                activeProcess = null;
-                if (heartbeatTimer) {
-                    clearInterval(heartbeatTimer);
-                    heartbeatTimer = null;
-                }
-                if (options.verbose && !result.streamed && result.output) {
-                    output.write(`${result.output}\n`);
-                }
-                const reportPath = buildValidationReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, tool);
-                await writeTextFile(reportPath, result.output || 'No output captured.');
-                if (options.verbose) {
-                    output.write(`[report] ${reportPath}\n`);
-                }
-                if (interrupted) {
-                    return toValidation(tool, validationPrompt, result);
-                }
-                return toValidation(tool, validationPrompt, result);
-            }));
-            validationSpinner.stop();
+            });
             if (options.verbose) {
                 validations.forEach((validation) => {
                     logger.info({ cycle: cycleNumber, tool: validation.tool, output: validation.output }, 'Validator output');
@@ -311,7 +407,7 @@ export async function runCoordinator(options, context, deps = {}) {
                 await persistSession(session, context.env);
                 break;
             }
-            if (cycleNumber === iterations) {
+            if (cycleNumber === validationIterations) {
                 specEntry.status = 'failed';
                 output.write(chalk.yellow(`Max iterations reached for ${specEntry.file}.\n`));
                 if (session.config.stopOnFailure) {
@@ -372,14 +468,17 @@ async function summarizeCodebase(cwd) {
     const relative = files.map((file) => path.relative(cwd, file));
     return relative.join('\n');
 }
-function buildLeadPrompt(specContent, contextDocs, validationFeedback, codebaseSummary, specFile, reportFiles) {
+function buildLeadPrompt(specContent, contextDocs, validationFeedback, codebaseSummary, specFile, reportFiles, reportSummaries) {
     const contextHint = contextDocs.length > 0
         ? 'System/architecture specs are present in the specs directory and should be used for context.'
         : 'Use any relevant supporting specs in the specs directory for context.';
     const reportSection = reportFiles.length > 0
         ? `\n\nPrevious validation reports:\n${reportFiles.map((file) => `- ${file}`).join('\n')}`
         : '';
-    return `You are implementing a feature defined in the project specs.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Implement the requirements in that spec.\n3. Follow the acceptance criteria precisely.\n4. Address any gaps identified in previous validation feedback.\n5. Explain significant implementation decisions.\n\n${contextHint}${reportSection}\n\nCURRENT CODEBASE STATE (summary):\n${codebaseSummary}\n\nPREVIOUS VALIDATION FEEDBACK (if any):\n${validationFeedback}`;
+    const reportContentSection = reportSummaries
+        ? `\n\nPREVIOUS REPORT CONTENT (most recent first):\n${reportSummaries}`
+        : '';
+    return `You are implementing a feature defined in the project specs.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Implement the requirements in that spec.\n3. Follow the acceptance criteria precisely.\n4. Address any gaps identified in previous validation feedback.\n5. Review prior execution/validation reports and avoid repeating known issues.\n6. Explain significant implementation decisions.\n\n${contextHint}${reportSection}${reportContentSection}\n\nCURRENT CODEBASE STATE (summary):\n${codebaseSummary}\n\nPREVIOUS VALIDATION FEEDBACK (if any):\n${validationFeedback}`;
 }
 async function buildValidationPrompt(specContent, contextDocs, cwd, specFile) {
     const codebaseContent = await readCodebaseContent(cwd);
@@ -538,6 +637,9 @@ async function runLeadWithRetry(runner, tool, prompt, cwd, timeoutMs) {
     }
     const second = await runner.runLead(tool, prompt, cwd, timeoutMs);
     if (second.exitCode !== 0) {
+        if (!second.output || second.output.trim().length === 0) {
+            return second;
+        }
         throw new Error(`Lead execution failed after retry: ${tool}`);
     }
     return second;
@@ -663,6 +765,110 @@ async function ensureSandboxAvailable() {
     catch {
         throw new Error('Sandbox mode requires Docker to be installed and available on PATH.');
     }
+}
+function needsResume(session) {
+    if (session.status === 'completed') {
+        return false;
+    }
+    return session.specs.some((spec) => spec.status !== 'completed' && spec.status !== 'skipped');
+}
+async function confirmResume() {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+    const response = await rl.question('Previous run found without consensus. Resume? [Y/n] ');
+    rl.close();
+    return response.trim().toLowerCase() !== 'n';
+}
+async function loadCompletedSpecKeys(cwd) {
+    const completed = new Set();
+    const sessionsDir = getProjectSessionsDir(cwd);
+    if (!(await pathExists(sessionsDir))) {
+        return completed;
+    }
+    const files = await fs.readdir(sessionsDir);
+    for (const file of files) {
+        if (!file.endsWith('.json')) {
+            continue;
+        }
+        try {
+            const content = await fs.readFile(path.join(sessionsDir, file), 'utf8');
+            const parsed = JSON.parse(content);
+            for (const spec of parsed.specs ?? []) {
+                if (spec.status === 'completed') {
+                    if (spec.meta?.id) {
+                        completed.add(spec.meta.id);
+                    }
+                    if (spec.file) {
+                        completed.add(spec.file);
+                    }
+                }
+            }
+        }
+        catch {
+            // Ignore unreadable session files.
+        }
+    }
+    return completed;
+}
+async function hasImplementationArtifacts(cwd) {
+    const files = await listFilesRecursive(cwd, {
+        excludeDirs: ['node_modules', 'dist', '.git', '.ai-coord', 'specs', 'data'],
+        limit: 5
+    });
+    return files.length > 0;
+}
+async function getRecentReportSummaries(cwd, specId, limit) {
+    const reportsDir = getProjectReportsDir(cwd);
+    if (!(await pathExists(reportsDir))) {
+        return '';
+    }
+    const safeSpec = specId.replace(/[^a-z0-9-_]/gi, '_');
+    const entries = await fs.readdir(reportsDir);
+    const candidates = await Promise.all(entries
+        .filter((entry) => entry.includes(`-${safeSpec}-`) && entry.endsWith('.md'))
+        .map(async (entry) => {
+        const filePath = path.join(reportsDir, entry);
+        const stat = await fs.stat(filePath);
+        return { filePath, mtimeMs: stat.mtimeMs };
+    }));
+    const sorted = candidates.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, limit);
+    const summaries = [];
+    for (const entry of sorted) {
+        const content = await fs.readFile(entry.filePath, 'utf8');
+        const trimmed = content.trim().slice(0, 8000);
+        summaries.push(`# ${path.basename(entry.filePath)}\n${trimmed}`);
+    }
+    return summaries.join('\n\n');
+}
+async function runValidationPass(input) {
+    const validationSpinner = ora({ isEnabled: false });
+    const label = input.cycleNumber === 0
+        ? 'Preflight: Validators running'
+        : `Cycle ${input.cycleNumber}/${input.session.config.maxIterations}: Validators running`;
+    validationSpinner.start(label);
+    await ensureDir(getProjectReportsDir(input.cwd));
+    const validations = await Promise.all(input.roleAssignment.validators.map(async (tool) => {
+        if (input.options.verbose) {
+            input.output.write(`[validator:${tool}] starting\n`);
+        }
+        const result = await input.runner.runValidator(tool, input.validationPrompt, input.cwd, input.timeoutMs);
+        if (input.options.verbose && !result.streamed && result.output) {
+            input.output.write(`${result.output}\n`);
+        }
+        if (input.onProcessComplete) {
+            input.onProcessComplete();
+        }
+        const reportPath = buildValidationReportPath(input.cwd, input.session.id, input.specEntry.meta.id, input.cycleNumber, tool);
+        await writeTextFile(reportPath, result.output || 'No output captured.');
+        if (input.options.verbose) {
+            input.output.write(`[report] ${reportPath}\n`);
+        }
+        return toValidation(tool, input.validationPrompt, result);
+    }));
+    validationSpinner.stop();
+    return validations;
 }
 function buildValidationReportPath(cwd, sessionId, specId, cycleNumber, tool) {
     const safeSpec = specId.replace(/[^a-z0-9-_]/gi, '_');
