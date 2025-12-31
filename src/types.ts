@@ -26,6 +26,7 @@ export interface SpecEntry {
   startedAt?: string;
   completedAt?: string;
   contextOnly?: boolean;
+  lastError?: string;
 }
 
 export type SessionStatus = 'pending' | 'in_progress' | 'completed' | 'partial' | 'failed' | 'abandoned';

@@ -298,11 +298,26 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         if (options.verbose && !leadResult.streamed && leadResult.output) {
           output.write(`${leadResult.output}\n`);
         }
-        if (!leadResult.output || leadResult.output.trim().length === 0) {
-          throw new Error(`Lead tool ${roleAssignment.lead} returned no output.`);
-        }
-        const leadReportPath = buildLeadReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, roleAssignment.lead);
-        await writeTextFile(leadReportPath, leadResult.output || 'No output captured.');
+      const leadReportPath = buildLeadReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, roleAssignment.lead);
+      if (!leadResult.output || leadResult.output.trim().length === 0) {
+        const durationSeconds = Math.max(1, Math.round(leadResult.durationMs / 1000));
+        const leadFailureMessage = [
+          `Lead tool ${roleAssignment.lead} returned no output.`,
+          `Exit code: ${leadResult.exitCode}. Duration: ${durationSeconds}s.`,
+          'Possible causes: system sleep, tool timeout, authentication failure, or network interruption.',
+          `Check logs: ${path.join('.ai-coord', 'logs', `${session.id}.log`)}`
+        ].join(' ');
+        specEntry.status = 'failed';
+        specEntry.lastError = leadFailureMessage;
+        await writeTextFile(leadReportPath, leadFailureMessage);
+        await persistSession(session, context.env);
+        logger.error(
+          { cycle: cycleNumber, tool: roleAssignment.lead, exitCode: leadResult.exitCode, durationMs: leadResult.durationMs },
+          leadFailureMessage
+        );
+        throw new Error(leadFailureMessage);
+      }
+      await writeTextFile(leadReportPath, leadResult.output || 'No output captured.');
         if (options.verbose) {
           output.write(`[report] ${leadReportPath}\n`);
         }

@@ -240,6 +240,9 @@ function formatSessionStatus(session: Session): string {
     lines.push(
       `${index + 1}. ${spec.file} - ${spec.status} (cycles: ${cycles}, completeness: ${completeness}%)`
     );
+    if (spec.lastError) {
+      lines.push(`   Last error: ${spec.lastError}`);
+    }
   });
   lines.push('');
   return `${lines.join('\n')}\n`;
@@ -251,6 +254,7 @@ function formatSessionSummary(session: Session): string {
   const failed = session.specs.filter((spec) => spec.status === 'failed').length;
   const inProgress = session.specs.filter((spec) => spec.status === 'in_progress').length;
   const activeSpec = session.specs.find((spec) => spec.status === 'in_progress')?.file ?? 'None';
+  const lastError = session.specs.find((spec) => spec.lastError)?.lastError;
   const lines = [
     `Session: ${session.id}`,
     `Status: ${session.status}`,
@@ -261,6 +265,9 @@ function formatSessionSummary(session: Session): string {
     `Specs: ${completed}/${total} completed, ${failed} failed, ${inProgress} in progress`,
     ''
   ];
+  if (lastError) {
+    lines.splice(6, 0, `Last Error: ${lastError}`);
+  }
   return `${lines.join('\n')}\n`;
 }
 
