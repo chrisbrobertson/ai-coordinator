@@ -115,6 +115,48 @@ describe('cli commands', () => {
     expect(stdout.output).toContain('Project:');
   });
 
+  it('shows pending specs and resume hint', async () => {
+    const projectDir = await createTempDir('aic-cli-status-pending-');
+    const sessionsDir = path.join(projectDir, '.ai-coord', 'sessions');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    const currentId = 'session-pending';
+    const now = new Date().toISOString();
+
+    await fs.writeFile(
+      path.join(sessionsDir, `${currentId}.json`),
+      JSON.stringify({
+        id: currentId,
+        workingDirectory: projectDir,
+        specsDirectory: path.join(projectDir, 'specs'),
+        specs: [
+          { status: 'in_progress', file: 'feat-core.md', path: 'specs/feat-core.md' },
+          { status: 'failed', file: 'feat-next.md', path: 'specs/feat-next.md' }
+        ],
+        lead: 'claude',
+        validators: ['codex'],
+        config: {},
+        status: 'partial',
+        currentSpecIndex: 0,
+        createdAt: now,
+        updatedAt: now
+      }),
+      'utf8'
+    );
+    await fs.writeFile(path.join(projectDir, '.ai-coord', 'session'), currentId, 'utf8');
+
+    const stdout = createOutputBuffer();
+    await runCli({
+      argv: ['status'],
+      cwd: projectDir,
+      stdout: stdout.stream,
+      stderr: createOutputBuffer().stream,
+      env: process.env
+    });
+
+    expect(stdout.output).toContain('Pending Specs: feat-core.md, feat-next.md');
+    expect(stdout.output).toContain('Resume: aic run');
+  });
+
   it('shows full status with --full', async () => {
     const projectDir = await createTempDir('aic-cli-status-full-');
     const sessionsDir = path.join(projectDir, '.ai-coord', 'sessions');

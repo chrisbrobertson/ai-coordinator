@@ -249,4 +249,69 @@ describe('runCoordinator integration', () => {
     const parsed = JSON.parse(updated) as { specs: Array<{ status: string }> };
     expect(parsed.specs[0]?.status).toBe('completed');
   });
+
+  it('retries validator when output format is invalid', async () => {
+    const projectDir = await createTempDir('aic-project-');
+    const specsDir = path.join(projectDir, 'specs');
+    await fs.mkdir(specsDir, { recursive: true });
+    await fs.writeFile(path.join(specsDir, 'feat-core.md'), specContent, 'utf8');
+
+    const binDir = await createTempDir('aic-bin-');
+    const fakeTool = `#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"tool 1.0.0\"\n  exit 0\nfi\nexit 0\n`;
+    await makeExecutable(path.join(binDir, 'claude'), fakeTool);
+    await makeExecutable(path.join(binDir, 'codex'), fakeTool);
+
+    const options: RunOptions = {
+      specs: undefined,
+      exclude: undefined,
+      lead: undefined,
+      validators: undefined,
+      maxIterations: 1,
+      timeout: 1,
+      resume: false,
+      stopOnFailure: false,
+      leadPermissions: undefined,
+      sandbox: false,
+      interactive: false,
+      verbose: false,
+      quiet: true,
+      dryRun: false,
+      preflight: true,
+      preflightThreshold: 70,
+      preflightIterations: 2,
+      startOver: false
+    };
+
+    let validatorCalls = 0;
+    const runner = {
+      async runLead() {
+        return { output: 'done', exitCode: 0, durationMs: 5, streamed: false };
+      },
+      async runValidator() {
+        validatorCalls += 1;
+        if (validatorCalls === 1) {
+          return { output: 'bad output', exitCode: 0, durationMs: 5, streamed: false };
+        }
+        return {
+          output: 'COMPLETENESS: 100%\\nSTATUS: PASS\\nGAPS:\\n- None\\nRECOMMENDATIONS:\\n- None',
+          exitCode: 0,
+          durationMs: 5,
+          streamed: false
+        };
+      }
+    };
+
+    await runCoordinator(options, {
+      cwd: projectDir,
+      output: process.stdout,
+      errorOutput: process.stderr,
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH}`,
+        AIC_TEST_MODE: '1'
+      }
+    }, { runner });
+
+    expect(validatorCalls).toBe(2);
+  });
 });
