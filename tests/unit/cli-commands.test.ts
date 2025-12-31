@@ -108,8 +108,11 @@ describe('cli commands', () => {
     });
 
     expect(stdout.output).toContain('Session:');
+    expect(stdout.output).toContain('Working Directory:');
+    expect(stdout.output).toContain('Active Spec:');
     expect(stdout.output).toContain('Previous sessions:');
     expect(stdout.output).toContain(previousId);
+    expect(stdout.output).toContain('Project:');
   });
 
   it('shows full status with --full', async () => {
@@ -150,6 +153,8 @@ describe('cli commands', () => {
     });
 
     expect(stdout.output).toContain('Specs:');
+    expect(stdout.output).toContain('Working Directory:');
+    expect(stdout.output).toContain('Active Spec:');
     expect(stdout.output).toContain('feat-core.md');
   });
 

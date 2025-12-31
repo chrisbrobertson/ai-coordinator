@@ -158,6 +158,8 @@ export async function runCli(options: CliRunOptions): Promise<void> {
         stdout.write('Previous sessions:\n');
         history.forEach((entry) => {
           stdout.write(`- ${entry.id}: ${entry.status} (${entry.updatedAt}) - ${entry.specsSummary}\n`);
+          stdout.write(`  Project: ${entry.workingDirectory}\n`);
+          stdout.write(`  Active Spec: ${entry.activeSpec}\n`);
         });
       }
     });
@@ -216,10 +218,12 @@ export function createProgram(): Command {
 }
 
 function formatSessionStatus(session: Session): string {
+  const activeSpec = session.specs.find((spec) => spec.status === 'in_progress')?.file ?? 'None';
   const lines = [
     `Session: ${session.id}`,
     `Status: ${session.status}`,
     `Working Directory: ${session.workingDirectory}`,
+    `Active Spec: ${activeSpec}`,
     `Lead: ${session.lead}`,
     `Validators: ${session.validators.join(', ')}`,
     ''
@@ -246,9 +250,12 @@ function formatSessionSummary(session: Session): string {
   const completed = session.specs.filter((spec) => spec.status === 'completed').length;
   const failed = session.specs.filter((spec) => spec.status === 'failed').length;
   const inProgress = session.specs.filter((spec) => spec.status === 'in_progress').length;
+  const activeSpec = session.specs.find((spec) => spec.status === 'in_progress')?.file ?? 'None';
   const lines = [
     `Session: ${session.id}`,
     `Status: ${session.status}`,
+    `Working Directory: ${session.workingDirectory}`,
+    `Active Spec: ${activeSpec}`,
     `Lead: ${session.lead}`,
     `Validators: ${session.validators.join(', ')}`,
     `Specs: ${completed}/${total} completed, ${failed} failed, ${inProgress} in progress`,
@@ -282,13 +289,27 @@ async function removeOldFiles(dirs: string[], threshold: number): Promise<number
 async function loadSessionHistory(
   cwd: string,
   excludeId?: string
-): Promise<Array<{ id: string; status: string; updatedAt: string; specsSummary: string }>> {
+): Promise<Array<{
+  id: string;
+  status: string;
+  updatedAt: string;
+  specsSummary: string;
+  workingDirectory: string;
+  activeSpec: string;
+}>> {
   const sessionsDir = getProjectSessionsDir(cwd);
   if (!(await pathExists(sessionsDir))) {
     return [];
   }
   const entries = await fs.readdir(sessionsDir, { withFileTypes: true });
-  const sessions: Array<{ id: string; status: string; updatedAt: string; specsSummary: string }> = [];
+  const sessions: Array<{
+    id: string;
+    status: string;
+    updatedAt: string;
+    specsSummary: string;
+    workingDirectory: string;
+    activeSpec: string;
+  }> = [];
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.json')) {
       continue;
@@ -298,13 +319,27 @@ async function loadSessionHistory(
       continue;
     }
     const content = await fs.readFile(path.join(sessionsDir, entry.name), 'utf8');
-    const parsed = JSON.parse(content) as { id: string; status: string; updatedAt: string; specs: Array<{ status: string }> };
+    const parsed = JSON.parse(content) as {
+      id: string;
+      status: string;
+      updatedAt: string;
+      workingDirectory?: string;
+      specs: Array<{ status: string; file?: string }>;
+    };
     const total = parsed.specs?.length ?? 0;
     const completed = parsed.specs?.filter((spec) => spec.status === 'completed').length ?? 0;
     const failed = parsed.specs?.filter((spec) => spec.status === 'failed').length ?? 0;
     const inProgress = parsed.specs?.filter((spec) => spec.status === 'in_progress').length ?? 0;
     const specsSummary = `${completed}/${total} completed, ${failed} failed, ${inProgress} in progress`;
-    sessions.push({ id: parsed.id, status: parsed.status, updatedAt: parsed.updatedAt, specsSummary });
+    const activeSpec = parsed.specs?.find((spec) => spec.status === 'in_progress')?.file ?? 'None';
+    sessions.push({
+      id: parsed.id,
+      status: parsed.status,
+      updatedAt: parsed.updatedAt,
+      specsSummary,
+      workingDirectory: parsed.workingDirectory ?? cwd,
+      activeSpec
+    });
   }
   sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return sessions;
