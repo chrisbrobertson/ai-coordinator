@@ -2,5 +2,5 @@
 
 ## Unreleased
 
-## 0.8.0
-- Alpha testing ready milestone.
+## 0.9.0
+- Add validation-only runs with full validator pass.

@@ -47,6 +47,18 @@ aic run [options]
 aic status [--full]
 ```
 
+## Validate Options
+```bash
+aic validate [options]
+
+--specs <files>         # Comma-separated list or glob of specs to include
+--exclude <files>       # Comma-separated list or glob of specs to exclude
+--timeout <minutes>     # Per-cycle timeout in minutes (default: 10)
+--verbose               # Stream tool output
+--heartbeat <seconds>   # Verbose heartbeat interval in seconds (0 to disable)
+--quiet                 # Minimal output
+```
+
 ## How Specs Are Processed
 - Specs are discovered from `./specs/*.md` with valid Spec-MAS front matter.
 - Files named `system-*.md` are context-only and not built directly.

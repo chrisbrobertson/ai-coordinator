@@ -18,6 +18,15 @@ export interface RunDependencies {
   runner?: ToolRunner;
 }
 
+export interface ValidationOnlyOptions {
+  specs?: string;
+  exclude?: string;
+  timeout: number;
+  verbose: boolean;
+  heartbeat: number;
+  quiet: boolean;
+}
+
 export async function runCoordinator(options: RunOptions, context: RunContext, deps: RunDependencies = {}): Promise<void> {
   const cwd = context.cwd;
   const output = context.output;
@@ -504,6 +513,209 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
     process.exitCode = 130;
     process.exit(130);
   }
+}
+
+export async function runValidationOnly(
+  options: ValidationOnlyOptions,
+  context: RunContext,
+  deps: RunDependencies = {}
+): Promise<void> {
+  const cwd = context.cwd;
+  const output = context.output;
+
+  const spinner = ora({ isEnabled: false });
+  await autoCleanState(cwd);
+
+  spinner.start('Detecting tools');
+  const registry = await detectTools(context.env);
+  spinner.stop();
+
+  const validators = [...registry.available.keys()];
+  if (validators.length === 0) {
+    throw new Error('No AI tools found. Install at least one: claude, codex, or gemini');
+  }
+
+  const specsDir = path.join(cwd, SPECS_DIR);
+  const includeSpecs = options.specs ? options.specs.split(',').map((value) => value.trim()).filter(Boolean) : undefined;
+  const excludeSpecs = options.exclude ? options.exclude.split(',').map((value) => value.trim()).filter(Boolean) : undefined;
+
+  spinner.start('Loading specs');
+  const loadedSpecs = await loadSpecs(specsDir, { include: includeSpecs, exclude: excludeSpecs });
+  spinner.stop();
+
+  if (loadedSpecs.length === 0) {
+    throw new Error('No specs found in ./specs/');
+  }
+
+  const entries = orderSpecs(loadedSpecs.map((spec) => spec.entry));
+  const orderedLoaded = entries.map((entry) => loadedSpecs.find((spec) => spec.entry.path === entry.path)).filter(Boolean) as LoadedSpec[];
+
+  const session = await createSession({
+    cwd,
+    specs: entries,
+    lead: validators[0],
+    validators,
+    config: {
+      maxIterations: 1,
+      timeoutPerCycle: options.timeout,
+      leadPermissions: undefined,
+      sandbox: false,
+      stopOnFailure: false,
+      verbose: options.verbose,
+      quiet: options.quiet,
+      preflight: false,
+      preflightThreshold: 0,
+      preflightIterations: 0
+    },
+    env: context.env
+  });
+
+  output.write(formatStartSummary({
+    cwd,
+    specsDir,
+    specs: entries,
+    lead: validators[0],
+    validators,
+    isResume: false
+  }));
+  if (!options.quiet) {
+    await startCountdown(output);
+  }
+
+  const logger = await createLogger(session.id, cwd);
+  logger.info({ sessionId: session.id }, 'Validation session started');
+
+  let activeProcess: ReturnType<typeof execa> | null = null;
+  let heartbeatTimer: NodeJS.Timeout | null = null;
+  const heartbeatSeconds = Math.max(0, Number.isFinite(options.heartbeat) ? options.heartbeat : 0);
+  const runner = deps.runner ?? new DefaultToolRunner({
+    interactive: false,
+    leadPermissions: undefined,
+    sandbox: false,
+    sandboxImage: context.env.AIC_SANDBOX_IMAGE ?? 'node:20',
+    verbose: options.verbose,
+    output,
+    inheritStdin: false,
+    env: context.env,
+    onSpawn: (info) => {
+      activeProcess = info.child;
+      if (heartbeatSeconds > 0) {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+        }
+        heartbeatTimer = setInterval(() => {
+          output.write(`- Heartbeat: ${info.command} running (${info.args.join(' ')})\n`);
+        }, heartbeatSeconds * 1000);
+      }
+    }
+  });
+
+  const handleSigint = () => {
+    output.write('\nInterrupted. Saving session state...\n');
+    if (activeProcess) {
+      const proc = activeProcess;
+      proc.kill('SIGTERM');
+      setTimeout(() => {
+        if (!proc.killed) {
+          proc.kill('SIGKILL');
+        }
+      }, 2000);
+    }
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  };
+
+  process.on('SIGINT', handleSigint);
+  process.on('SIGTERM', handleSigint);
+
+  for (let i = 0; i < session.specs.length; i += 1) {
+    const specEntry = session.specs[i];
+    session.currentSpecIndex = i;
+    if (specEntry.contextOnly) {
+      specEntry.status = 'skipped';
+      await persistSession(session, context.env);
+      continue;
+    }
+    const specContent = orderedLoaded.find((spec) => spec.entry.path === specEntry.path)?.content ?? '';
+    specEntry.status = 'in_progress';
+    specEntry.startedAt = new Date().toISOString();
+    await persistSession(session, context.env);
+
+    const validationPrompt = await buildValidationPrompt(specContent, [], cwd, specEntry.file);
+    const validations = await runValidationPass({
+      cycleNumber: 1,
+      specEntry,
+      session,
+      validationPrompt,
+      roleAssignment: { validators },
+      runner,
+      cwd,
+      timeoutMs: options.timeout * 60_000,
+      output,
+      options: {
+        specs: undefined,
+        exclude: undefined,
+        lead: undefined,
+        validators: validators.join(','),
+        maxIterations: 1,
+        timeout: options.timeout,
+        resume: false,
+        stopOnFailure: false,
+        leadPermissions: undefined,
+        sandbox: false,
+        interactive: false,
+        verbose: options.verbose,
+        heartbeat: options.heartbeat,
+        quiet: options.quiet,
+        dryRun: false,
+        preflight: false,
+        preflightThreshold: 0,
+        preflightIterations: 0,
+        startOver: false
+      },
+      onProcessComplete: () => {
+        activeProcess = null;
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+      }
+    });
+
+    const consensusReached = hasConsensus(validations.map((validation) => validation.parsed));
+    specEntry.status = consensusReached ? 'completed' : 'failed';
+    specEntry.completedAt = new Date().toISOString();
+    specEntry.cycles.push({
+      number: 1,
+      specId: specEntry.meta.id,
+      startedAt: specEntry.startedAt,
+      completedAt: specEntry.completedAt,
+      leadExecution: {
+        tool: validators[0],
+        prompt: 'Validation-only run.',
+        output: 'Validation-only run.',
+        filesModified: [],
+        durationMs: 0,
+        exitCode: 0
+      },
+      validations,
+      consensusReached
+    });
+    await persistSession(session, context.env);
+  }
+
+  session.status = session.specs.every((spec) => spec.status === 'completed' || spec.status === 'skipped')
+    ? 'completed'
+    : 'partial';
+  await persistSession(session, context.env);
+  await generateReport(session, context.env);
+  if (session.status === 'completed') {
+    await completeSession(session, context.env);
+  }
+  process.off('SIGINT', handleSigint);
+  process.off('SIGTERM', handleSigint);
 }
 
 function formatDryRun(specs: SpecEntry[], lead: string, validators: string[]): string {

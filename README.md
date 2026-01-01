@@ -70,6 +70,7 @@ npx aic run
 ## Commands
 ```bash
 aic run [options]
+aic validate [options]
 aic tools
 aic init
 aic specs
@@ -99,6 +100,16 @@ aic clean
 --dry-run               # List specs and exit
 --start-over            # Ignore previous session state and start fresh
 --no-preflight          # Disable preflight validation on existing code
+```
+
+## Validate Options
+```bash
+--specs <files>         # Comma-separated list or glob of specs to include
+--exclude <files>       # Comma-separated list or glob of specs to exclude
+--timeout <minutes>     # Per-cycle timeout in minutes (default: 10)
+--verbose               # Stream tool output
+--heartbeat <seconds>   # Verbose heartbeat interval (0 disables)
+--quiet                 # Minimal output
 ```
 
 ## Status Options

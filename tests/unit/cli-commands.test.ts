@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { runCli } from '../../src/cli/cli';
@@ -6,7 +6,14 @@ import { createOutputBuffer, createTempDir } from '../helpers';
 
 const specContent = `---\nspecmas: v3\nkind: FeatureSpec\nid: feat-core\nname: Core\nversion: 1.0.0\ncomplexity: EASY\nmaturity: 3\n---\n# Core`;
 
+let runValidationOnly: ReturnType<typeof import('../../src/orchestration/run')>['runValidationOnly'];
+
 describe('cli commands', () => {
+  beforeEach(async () => {
+    const mod = await import('../../src/orchestration/run');
+    runValidationOnly = mod.runValidationOnly;
+  });
+
   it('lists specs with status', async () => {
     const projectDir = await createTempDir('aic-cli-specs-');
     const specsDir = path.join(projectDir, 'specs');
@@ -260,5 +267,43 @@ describe('cli commands', () => {
 
     expect(stdout.output).toContain('Cleaned sessions');
     await expect(fs.access(path.join(projectDir, '.ai-coord'))).rejects.toBeDefined();
+  });
+
+  it('invokes validate command', async () => {
+    const projectDir = await createTempDir('aic-cli-validate-');
+    const specsDir = path.join(projectDir, 'specs');
+    await fs.mkdir(specsDir, { recursive: true });
+    await fs.writeFile(path.join(specsDir, 'feat-core.md'), specContent, 'utf8');
+
+    const stdout = createOutputBuffer();
+    await runValidationOnly({
+      specs: undefined,
+      exclude: undefined,
+      timeout: 1,
+      verbose: false,
+      heartbeat: 0,
+      quiet: true
+    }, {
+      cwd: projectDir,
+      output: stdout.stream,
+      errorOutput: createOutputBuffer().stream,
+      env: process.env
+    }, {
+      runner: {
+        async runLead() {
+          return { output: 'n/a', exitCode: 0, durationMs: 0, streamed: false };
+        },
+        async runValidator() {
+          return {
+            output: 'COMPLETENESS: 100%\\nSTATUS: PASS\\nGAPS:\\n- None\\nRECOMMENDATIONS:\\n- None',
+            exitCode: 0,
+            durationMs: 5,
+            streamed: false
+          };
+        }
+      }
+    });
+
+    expect(stdout.output).toContain('Specs to build');
   });
 });

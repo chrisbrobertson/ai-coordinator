@@ -5,7 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { detectTools } from '../tools/registry.js';
 import { TOOL_DEFINITIONS } from '../tools/tool-definitions.js';
-import { runCoordinator } from '../orchestration/run.js';
+import { runCoordinator, runValidationOnly } from '../orchestration/run.js';
 import { loadSpecs, orderSpecs } from '../specs/discovery.js';
 import { RunContext, RunOptions, Session } from '../types.js';
 import { PROJECT_SESSION_FILE, SPECS_DIR, getProjectLogsDir, getProjectReportsDir, getProjectSessionsDir, getProjectStateDir } from '../config/paths.js';
@@ -92,6 +92,30 @@ export async function runCli(options: CliRunOptions): Promise<void> {
         }
       }
       stdout.write(`${table.toString()}\n`);
+    });
+
+  program.command('validate')
+    .description('Validate specs without running the lead tool')
+    .option('--specs <files>', 'Comma-separated list or glob of specs to include')
+    .option('--exclude <files>', 'Comma-separated list or glob of specs to exclude')
+    .option('--timeout <minutes>', 'Per-cycle timeout in minutes', Number, 10)
+    .option('--verbose', 'Verbose output')
+    .option('--heartbeat <seconds>', 'Verbose heartbeat interval in seconds (0 to disable)', Number, 0)
+    .option('--quiet', 'Quiet output')
+    .action(async (cmd) => {
+      const context: RunContext = {
+        cwd,
+        output: stdout,
+        errorOutput: stderr,
+        env
+      };
+      try {
+        await runValidationOnly(cmd, context);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        stderr.write(chalk.red(`${message}\n`));
+        process.exitCode = 1;
+      }
     });
 
   program.command('init')
@@ -214,7 +238,7 @@ export function createProgram(): Command {
   program
     .name('aic')
     .description('AI Spec Coordinator')
-    .version('1.0.0');
+    .version('0.9.0');
   return program;
 }
 
