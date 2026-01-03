@@ -36,6 +36,10 @@ See `docs/SESSION_STATE.md` for field details.
 - Most CLIs require login (e.g., `claude /login`).
 - If tools cannot write to HOME in CI, set `AIC_TOOL_HOME`.
 
+### Rate Limits
+- If the lead tool hits a rate limit, the coordinator automatically switches to the next available tool.
+- Check logs to see which tool was selected and when the switch occurred.
+
 ### Validator Output Missing
 - Check the validator report in `./.ai-coord/reports/`.
 - Ensure the tool supports headless mode and JSON output.

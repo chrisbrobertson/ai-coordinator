@@ -426,13 +426,13 @@ The system determines when implementation is complete based on Validator agreeme
 The system enforces iteration limits and provides progress feedback.
 
 **Configuration:**
-- `--max-iterations=N` (default: 5)
+- `--max-iterations=N` (default: 15)
 - `--timeout-per-cycle=M` minutes (default: 10)
 
 **Validation Criteria:**
-- Given max-iterations=3 and 3 cycles complete without consensus, Then exit with "Max iterations reached" and summary
+- Given max-iterations=3 and 3 cycles complete without consensus, Then mark spec skipped and advise manual review
 - Given a cycle exceeds timeout, Then kill subprocess and count as failed cycle
-- Progress displayed after each cycle: "Cycle 2/5: Lead completed, awaiting validation..."
+- Progress displayed after each cycle: "Cycle 2/5 (total 7/15): Lead completed, awaiting validation..."
 
 ### FR-9: Session State Management
 The system maintains session state globally for resumability.
@@ -452,7 +452,7 @@ The system maintains session state globally for resumability.
   "lead": "claude",
   "validators": ["codex", "gemini"],
   "config": {
-    "max_iterations": 5,
+    "max_iterations": 15,
     "stop_on_failure": false
   },
   "status": "in_progress",
@@ -786,7 +786,7 @@ aic run [options]
 --validators=<tools>    # Comma-separated validator list
 
 # Options - Execution Control
---max-iterations=<n>    # Max cycles per spec before abort (default: 5)
+--max-iterations=<n>    # Max cycles per spec before skip (default: 15)
 --timeout=<minutes>     # Per-cycle timeout (default: 10)
 --resume                # Resume last interrupted session in this directory
 --stop-on-failure       # Stop if any spec fails consensus (default: continue)
@@ -1101,7 +1101,7 @@ Each tool adapter must:
 - [x] Given `--lead=codex` flag, When session starts, Then Codex is assigned as Lead
 - [x] Given Validator returns STATUS: FAIL with gaps, When cycle completes, Then gaps are fed to next Lead cycle
 - [x] Given all Validators return STATUS: PASS, When consensus checked, Then spec marked complete, move to next
-- [x] Given max-iterations reached for a spec, When cycle completes, Then spec marked failed, continue to next (unless --stop-on-failure)
+- [x] Given max-iterations reached for a spec, When cycle completes, Then spec marked skipped with a manual-review warning, continue to next
 - [x] Given session interrupted with Ctrl+C, When restarted with `--resume`, Then continues from current spec and cycle
 - [x] Given `aic init` in empty directory, When executed, Then create specs/ with example spec
 - [x] Given `aic specs` command, When executed, Then display table of specs in ./specs/ with status

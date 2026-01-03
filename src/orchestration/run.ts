@@ -55,6 +55,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
     options.lead,
     requestedValidators
   );
+  let leadTool = roleAssignment.lead;
 
   const specsDir = path.join(cwd, SPECS_DIR);
   const includeSpecs = options.specs ? options.specs.split(',').map((value) => value.trim()).filter(Boolean) : undefined;
@@ -72,7 +73,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
   const orderedLoaded = entries.map((entry) => loadedSpecs.find((spec) => spec.entry.path === entry.path)).filter(Boolean) as LoadedSpec[];
 
   if (options.dryRun) {
-    output.write(formatDryRun(entries, roleAssignment.lead, roleAssignment.validators));
+    output.write(formatDryRun(entries, leadTool, roleAssignment.validators));
     return;
   }
 
@@ -114,7 +115,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
     session = await createSession({
       cwd,
       specs: entries,
-      lead: roleAssignment.lead,
+      lead: leadTool,
       validators: roleAssignment.validators,
       config: {
         maxIterations: options.maxIterations,
@@ -131,12 +132,13 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       env: context.env
     });
   }
+  leadTool = session.lead;
 
   output.write(formatStartSummary({
     cwd,
     specsDir,
     specs: entries,
-    lead: roleAssignment.lead,
+    lead: leadTool,
     validators: roleAssignment.validators,
     isResume: options.resume
   }));
@@ -232,12 +234,28 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
     const specContent = orderedLoaded.find((spec) => spec.entry.path === specEntry.path)?.content ?? '';
 
     const iterations = session.config.maxIterations;
+    const totalCycles = specEntry.cycles.length;
+    const remainingCycles = Math.max(0, iterations - totalCycles);
+
+    if (remainingCycles === 0) {
+      const maxMessage = `Max total iterations reached for ${specEntry.file} (${totalCycles}/${iterations}). Manual review required.`;
+      specEntry.status = 'skipped';
+      specEntry.completedAt = new Date().toISOString();
+      specEntry.lastError = maxMessage;
+      session.status = 'partial';
+      await persistSession(session, context.env);
+      if (!options.quiet) {
+        output.write(chalk.yellow(`${maxMessage}\n`));
+      }
+      continue;
+    }
+
     specEntry.status = 'in_progress';
     specEntry.startedAt = new Date().toISOString();
     await persistSession(session, context.env);
     let validationFeedback = '';
     let validateOnly = false;
-    let validationIterations = iterations;
+    let validationIterations = remainingCycles;
 
     const wasCompleted = completedSpecs.has(specEntry.meta.id) || completedSpecs.has(specEntry.file);
     if (options.preflight && (hasCodeArtifacts || wasCompleted)) {
@@ -256,6 +274,9 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         timeoutMs: options.timeout * 60_000,
         output,
         options,
+        currentRunIterations: validationIterations,
+        totalCyclesBeforeRun: totalCycles,
+        logger,
         onProcessComplete: () => {
           activeProcess = null;
           if (heartbeatTimer) {
@@ -270,7 +291,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       );
       if (consensus || avgCompleteness >= options.preflightThreshold) {
         validateOnly = true;
-        validationIterations = Math.min(options.preflightIterations, iterations);
+        validationIterations = Math.min(options.preflightIterations, remainingCycles);
         if (consensus) {
           specEntry.status = 'completed';
           specEntry.completedAt = new Date().toISOString();
@@ -283,6 +304,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
     }
 
     for (let cycleNumber = 1; cycleNumber <= validationIterations; cycleNumber += 1) {
+      const totalCycleNumber = totalCycles + cycleNumber;
       const cycleStart = new Date().toISOString();
       const previousReports = await getPreviousReportFiles(
         cwd,
@@ -310,25 +332,56 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
           historicalReports
         );
 
-        spinner.start(`Cycle ${cycleNumber}/${validationIterations}: Lead implementing ${specEntry.file}`);
-        if (options.verbose) {
-          output.write(`[lead:${roleAssignment.lead}] starting\n`);
+        const fallbackLeads = buildLeadFallbacks(leadTool, availableTools);
+        let lastError: Error | null = null;
+        for (let index = 0; index < fallbackLeads.length; index += 1) {
+          const candidate = fallbackLeads[index];
+          spinner.start(`Cycle ${cycleNumber}/${validationIterations} (total ${totalCycleNumber}/${iterations}): Lead implementing ${specEntry.file}`);
+          if (options.verbose) {
+            output.write(`[lead:${candidate}] starting\n`);
+          }
+          try {
+            leadResult = await runLeadWithRetry(runner, candidate, leadPrompt, cwd, options.timeout * 60_000, logger);
+            leadTool = candidate;
+            session.lead = candidate;
+            break;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            lastError = error instanceof Error ? error : new Error(message);
+            if (isLeadRateLimitError(error) || isRateLimitMessage(message)) {
+              if (index < fallbackLeads.length - 1) {
+                const nextLead = fallbackLeads[index + 1];
+                if (!options.quiet) {
+                  output.write(`Lead ${candidate} rate limited. Switching to ${nextLead}.\n`);
+                }
+                logger.warn({ from: candidate, to: nextLead }, 'Lead rate limit detected; switching lead tool');
+                leadTool = nextLead;
+                session.lead = nextLead;
+                await persistSession(session, context.env);
+                continue;
+              }
+            }
+            throw error;
+          } finally {
+            spinner.stop();
+            activeProcess = null;
+            if (heartbeatTimer) {
+              clearInterval(heartbeatTimer);
+              heartbeatTimer = null;
+            }
+          }
         }
-        leadResult = await runLeadWithRetry(runner, roleAssignment.lead, leadPrompt, cwd, options.timeout * 60_000);
-        spinner.stop();
-        activeProcess = null;
-        if (heartbeatTimer) {
-          clearInterval(heartbeatTimer);
-          heartbeatTimer = null;
+        if (!leadResult) {
+          throw lastError ?? new Error('Lead execution failed with no result.');
         }
         if (options.verbose && !leadResult.streamed && leadResult.output) {
           output.write(`${leadResult.output}\n`);
         }
-      const leadReportPath = buildLeadReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, roleAssignment.lead);
+      const leadReportPath = buildLeadReportPath(cwd, session.id, specEntry.meta.id, cycleNumber, leadTool);
       if (!leadResult.output || leadResult.output.trim().length === 0) {
         const durationSeconds = Math.max(1, Math.round(leadResult.durationMs / 1000));
         const leadFailureMessage = [
-          `Lead tool ${roleAssignment.lead} returned no output.`,
+          `Lead tool ${leadTool} returned no output.`,
           `Exit code: ${leadResult.exitCode}. Duration: ${durationSeconds}s.`,
           'Possible causes: system sleep, tool timeout, authentication failure, or network interruption.',
           `Check logs: ${path.join('.ai-coord', 'logs', `${session.id}.log`)}`
@@ -341,7 +394,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         await persistSession(session, context.env);
         await generateReport(session, context.env);
         logger.error(
-          { cycle: cycleNumber, tool: roleAssignment.lead, exitCode: leadResult.exitCode, durationMs: leadResult.durationMs },
+          { cycle: cycleNumber, tool: leadTool, exitCode: leadResult.exitCode, durationMs: leadResult.durationMs },
           leadFailureMessage
         );
         process.off('SIGINT', handleSigint);
@@ -388,9 +441,9 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         return;
       }
 
-      logger.info({ cycle: cycleNumber, tool: roleAssignment.lead }, 'Lead execution completed');
+      logger.info({ cycle: cycleNumber, tool: leadTool }, 'Lead execution completed');
       if (options.verbose) {
-        logger.info({ cycle: cycleNumber, tool: roleAssignment.lead, output: leadResult.output }, 'Lead output');
+        logger.info({ cycle: cycleNumber, tool: leadTool, output: leadResult.output }, 'Lead output');
       }
 
       const validationPrompt = await buildValidationPrompt(specContent, contextDocs, cwd, specEntry.file);
@@ -405,6 +458,9 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         timeoutMs: options.timeout * 60_000,
         output,
         options,
+        currentRunIterations: validationIterations,
+        totalCyclesBeforeRun: totalCycles,
+        logger,
         onProcessComplete: () => {
           activeProcess = null;
           if (heartbeatTimer) {
@@ -430,7 +486,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         startedAt: cycleStart,
         completedAt: new Date().toISOString(),
         leadExecution: {
-          tool: roleAssignment.lead,
+          tool: leadTool,
           prompt: leadPrompt,
           output: leadResult.output,
           filesModified: [],
@@ -473,16 +529,24 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       }
 
       if (cycleNumber === validationIterations) {
-        specEntry.status = 'failed';
-        output.write(chalk.yellow(`Max iterations reached for ${specEntry.file}.\n`));
-        if (session.config.stopOnFailure) {
+        if (totalCycleNumber >= iterations) {
+          const maxMessage = `Max total iterations reached for ${specEntry.file} (${totalCycleNumber}/${iterations}). Manual review required.`;
+          specEntry.status = 'skipped';
+          specEntry.completedAt = new Date().toISOString();
+          specEntry.lastError = maxMessage;
           session.status = 'partial';
-          await persistSession(session, context.env);
-          await generateReport(session, context.env);
-          return;
+          output.write(chalk.yellow(`${maxMessage}\n`));
+          if (session.config.stopOnFailure) {
+            await persistSession(session, context.env);
+            await generateReport(session, context.env);
+            return;
+          }
+        } else {
+          specEntry.status = 'failed';
+          output.write(chalk.yellow(`Run iteration limit reached for ${specEntry.file} (${cycleNumber}/${validationIterations}). Resume to continue.\n`));
         }
       } else {
-        output.write(`Cycle ${cycleNumber}/${iterations}: Lead completed, awaiting validation...\n`);
+        output.write(`Cycle ${cycleNumber}/${validationIterations} (total ${totalCycleNumber}/${iterations}): Lead completed, awaiting validation...\n`);
       }
     }
   }
@@ -675,6 +739,9 @@ export async function runValidationOnly(
         preflightIterations: 0,
         startOver: false
       },
+      currentRunIterations: 1,
+      totalCyclesBeforeRun: specEntry.cycles.length,
+      logger,
       onProcessComplete: () => {
         activeProcess = null;
         if (heartbeatTimer) {
@@ -917,17 +984,90 @@ export function hasConsensus(validations: ValidationResult[]): boolean {
   return passCount >= 2;
 }
 
-async function runLeadWithRetry(runner: ToolRunner, tool: ToolName, prompt: string, cwd: string, timeoutMs: number) {
+function buildLeadFallbacks(currentLead: ToolName, availableTools: ToolName[]): ToolName[] {
+  const unique: ToolName[] = [];
+  const candidates = [currentLead, ...availableTools.filter((tool) => tool !== currentLead)];
+  for (const tool of candidates) {
+    if (!unique.includes(tool)) {
+      unique.push(tool);
+    }
+  }
+  return unique;
+}
+
+class LeadRateLimitError extends Error {
+  tool: ToolName;
+  output: string;
+
+  constructor(tool: ToolName, output: string) {
+    super(`Lead rate limit: ${tool}`);
+    this.name = 'LeadRateLimitError';
+    this.tool = tool;
+    this.output = output;
+  }
+}
+
+function isLeadRateLimitError(error: unknown): error is LeadRateLimitError {
+  return error instanceof LeadRateLimitError;
+}
+
+function isRateLimitMessage(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('limit reached') ||
+    lower.includes('rate limit') ||
+    lower.includes('quota') ||
+    lower.includes('too many requests')
+  );
+}
+
+async function runLeadWithRetry(runner: ToolRunner, tool: ToolName, prompt: string, cwd: string, timeoutMs: number, logger?: any) {
   const first = await runner.runLead(tool, prompt, cwd, timeoutMs);
+  if (isRateLimitMessage(first.output)) {
+    throw new LeadRateLimitError(tool, first.output);
+  }
   if (first.exitCode === 0) {
     return first;
   }
+
+  // Log first failure
+  if (logger) {
+    logger.warn(
+      { tool, exitCode: first.exitCode, durationMs: first.durationMs },
+      `Lead execution failed (first attempt), retrying...`
+    );
+    if (first.output && first.output.trim().length > 0) {
+      logger.warn({ tool, output: first.output.substring(0, 1000) }, 'First attempt error output');
+    }
+  }
+
   const second = await runner.runLead(tool, prompt, cwd, timeoutMs);
+  if (isRateLimitMessage(second.output)) {
+    throw new LeadRateLimitError(tool, second.output);
+  }
   if (second.exitCode !== 0) {
     if (!second.output || second.output.trim().length === 0) {
       return second;
     }
-    throw new Error(`Lead execution failed after retry: ${tool}`);
+
+    // Log second failure with full details
+    if (logger) {
+      logger.error(
+        { tool, exitCode: second.exitCode, durationMs: second.durationMs },
+        'Lead execution failed after retry'
+      );
+      logger.error({ tool, output: second.output }, 'Error output from failed execution');
+    }
+
+    // Include error output in exception for visibility
+    const errorPreview = second.output.length > 500
+      ? second.output.substring(0, 500) + '...(truncated)'
+      : second.output;
+    throw new Error(
+      `Lead execution failed after retry: ${tool}\n` +
+      `Exit code: ${second.exitCode}\n` +
+      `Error output:\n${errorPreview}`
+    );
   }
   return second;
 }
@@ -1161,12 +1301,18 @@ async function runValidationPass(input: {
   timeoutMs: number;
   output: NodeJS.WritableStream;
   options: RunOptions;
+  currentRunIterations: number;
+  totalCyclesBeforeRun: number;
   onProcessComplete?: () => void;
+  logger?: any;
 }): Promise<Validation[]> {
   const validationSpinner = ora({ isEnabled: false });
+  const totalCycleNumber = input.cycleNumber === 0
+    ? input.totalCyclesBeforeRun
+    : input.totalCyclesBeforeRun + input.cycleNumber;
   const label = input.cycleNumber === 0
-    ? 'Preflight: Validators running'
-    : `Cycle ${input.cycleNumber}/${input.session.config.maxIterations}: Validators running`;
+    ? `Preflight: Validators running (total ${totalCycleNumber}/${input.session.config.maxIterations})`
+    : `Cycle ${input.cycleNumber}/${input.currentRunIterations} (total ${totalCycleNumber}/${input.session.config.maxIterations}): Validators running`;
   validationSpinner.start(label);
   await ensureDir(getProjectReportsDir(input.cwd));
   const validations = await Promise.all(
@@ -1175,6 +1321,18 @@ async function runValidationPass(input: {
         input.output.write(`[validator:${tool}] starting\n`);
       }
       let result = await input.runner.runValidator(tool, input.validationPrompt, input.cwd, input.timeoutMs);
+
+      // Log if validator failed with non-zero exit code
+      if (result.exitCode !== 0 && input.logger) {
+        input.logger.warn(
+          { tool, exitCode: result.exitCode, durationMs: result.durationMs },
+          'Validator execution returned non-zero exit code'
+        );
+        if (result.output && result.output.trim().length > 0) {
+          input.logger.warn({ tool, output: result.output.substring(0, 1000) }, 'Validator error output');
+        }
+      }
+
       if (input.options.verbose && !result.streamed && result.output) {
         input.output.write(`${result.output}\n`);
       }
@@ -1203,6 +1361,18 @@ async function runValidationPass(input: {
           input.output.write(`[validator:${tool}] retrying with format recovery\n`);
         }
         result = await input.runner.runValidator(tool, retryPrompt, input.cwd, input.timeoutMs);
+
+        // Log if retry also failed with non-zero exit code
+        if (result.exitCode !== 0 && input.logger) {
+          input.logger.warn(
+            { tool, exitCode: result.exitCode, durationMs: result.durationMs },
+            'Validator retry execution returned non-zero exit code'
+          );
+          if (result.output && result.output.trim().length > 0) {
+            input.logger.warn({ tool, output: result.output.substring(0, 1000) }, 'Validator retry error output');
+          }
+        }
+
         if (input.options.verbose && !result.streamed && result.output) {
           input.output.write(`${result.output}\n`);
         }

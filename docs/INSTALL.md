@@ -28,7 +28,7 @@ aic run [options]
 --exclude <files>       # Comma-separated list or glob of specs to exclude
 --lead <tool>           # Force lead tool (claude|codex|gemini)
 --validators <tools>    # Comma-separated list of validator tools
---max-iterations <n>    # Max cycles per spec (default: 5)
+--max-iterations <n>    # Max cycles per spec (default: 15)
 --timeout <minutes>     # Per-cycle timeout in minutes (default: 10)
 --preflight-threshold <n> # Preflight completeness threshold (default: 70)
 --preflight-iterations <n> # Max validation cycles in preflight mode (default: 2)
@@ -64,6 +64,7 @@ aic validate [options]
 - Files named `system-*.md` are context-only and not built directly.
 - Feature specs are ordered by `depends_on`/`dependsOn` (then filename).
 - Each spec runs to consensus or `--max-iterations` before advancing.
+- When the total iteration cap is hit, the spec is skipped and flagged for manual review.
 
 ## Where Output Goes
 - Project sessions/reports/logs: `./.ai-coord/`

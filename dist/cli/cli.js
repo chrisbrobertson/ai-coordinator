@@ -48,7 +48,7 @@ export async function runCli(options) {
         .option('--exclude <files>', 'Comma-separated list or glob of specs to exclude')
         .option('--lead <tool>', 'Force lead tool (claude|codex|gemini)')
         .option('--validators <tools>', 'Comma-separated list of validator tools')
-        .option('--max-iterations <n>', 'Max cycles per spec', Number, 5)
+        .option('--max-iterations <n>', 'Max cycles per spec', Number, 15)
         .option('--timeout <minutes>', 'Per-cycle timeout in minutes', Number, 10)
         .option('--preflight-threshold <n>', 'Preflight completeness threshold (0-100)', Number, 70)
         .option('--preflight-iterations <n>', 'Max validation cycles in preflight mode', Number, 2)

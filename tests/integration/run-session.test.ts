@@ -143,6 +143,78 @@ describe('runCoordinator integration', () => {
     expect(parsed.specs[0]?.lastError).toBeTruthy();
   });
 
+  it('switches lead tool on rate limit', async () => {
+    const projectDir = await createTempDir('aic-project-');
+    const specsDir = path.join(projectDir, 'specs');
+    await fs.mkdir(specsDir, { recursive: true });
+    await fs.writeFile(path.join(specsDir, 'feat-core.md'), specContent, 'utf8');
+
+    const binDir = await createTempDir('aic-bin-');
+    const fakeTool = `#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"tool 1.0.0\"\n  exit 0\nfi\nexit 0\n`;
+    await makeExecutable(path.join(binDir, 'claude'), fakeTool);
+    await makeExecutable(path.join(binDir, 'codex'), fakeTool);
+
+    const options: RunOptions = {
+      specs: undefined,
+      exclude: undefined,
+      lead: undefined,
+      validators: undefined,
+      maxIterations: 1,
+      timeout: 1,
+      resume: false,
+      stopOnFailure: false,
+      leadPermissions: undefined,
+      sandbox: false,
+      interactive: false,
+      verbose: false,
+      quiet: true,
+      dryRun: false,
+      preflight: false,
+      preflightThreshold: 70,
+      preflightIterations: 2,
+      startOver: false
+    };
+
+    const leadCalls: string[] = [];
+    const runner = {
+      async runLead(tool: string) {
+        leadCalls.push(tool);
+        if (tool === 'claude') {
+          return { output: 'Limit reached · resets 5am', exitCode: 1, durationMs: 5, streamed: false };
+        }
+        return { output: 'done', exitCode: 0, durationMs: 5, streamed: false };
+      },
+      async runValidator() {
+        return {
+          output: 'COMPLETENESS: 100%\\nSTATUS: PASS\\nGAPS:\\n- None\\nRECOMMENDATIONS:\\n- None',
+          exitCode: 0,
+          durationMs: 5,
+          streamed: false
+        };
+      }
+    };
+
+    await runCoordinator(options, {
+      cwd: projectDir,
+      output: process.stdout,
+      errorOutput: process.stderr,
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH}`,
+        AIC_TEST_MODE: '1'
+      }
+    }, { runner });
+
+    expect(leadCalls).toContain('claude');
+    expect(leadCalls).toContain('codex');
+
+    const sessionsDir = path.join(projectDir, '.ai-coord', 'sessions');
+    const sessionFiles = await fs.readdir(sessionsDir);
+    const content = await fs.readFile(path.join(sessionsDir, sessionFiles[0]), 'utf8');
+    const parsed = JSON.parse(content) as { lead?: string };
+    expect(parsed.lead).toBe('codex');
+  });
+
   it('resumes previous session by default when consensus not reached', async () => {
     const projectDir = await createTempDir('aic-project-');
     const specsDir = path.join(projectDir, 'specs');
@@ -313,5 +385,146 @@ describe('runCoordinator integration', () => {
     }, { runner });
 
     expect(validatorCalls).toBe(2);
+  });
+
+  it('skips spec when total iterations are exhausted', async () => {
+    const projectDir = await createTempDir('aic-project-');
+    const specsDir = path.join(projectDir, 'specs');
+    await fs.mkdir(specsDir, { recursive: true });
+    await fs.writeFile(path.join(specsDir, 'feat-core.md'), specContent, 'utf8');
+
+    const binDir = await createTempDir('aic-bin-');
+    const fakeTool = `#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  echo \"tool 1.0.0\"\n  exit 0\nfi\nexit 0\n`;
+    await makeExecutable(path.join(binDir, 'claude'), fakeTool);
+    await makeExecutable(path.join(binDir, 'codex'), fakeTool);
+
+    const priorSession = {
+      id: 'session-max',
+      workingDirectory: projectDir,
+      specsDirectory: specsDir,
+      specs: [
+        {
+          file: 'feat-core.md',
+          path: path.join(specsDir, 'feat-core.md'),
+          meta: {
+            id: 'feat-core',
+            name: 'Core',
+            complexity: 'EASY',
+            maturity: 3
+          },
+          status: 'failed',
+          cycles: [
+            {
+              number: 1,
+              specId: 'feat-core',
+              startedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+              leadExecution: {
+                tool: 'claude',
+                prompt: '',
+                output: '',
+                filesModified: [],
+                durationMs: 0,
+                exitCode: 1
+              },
+              validations: [],
+              consensusReached: false
+            },
+            {
+              number: 2,
+              specId: 'feat-core',
+              startedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+              leadExecution: {
+                tool: 'claude',
+                prompt: '',
+                output: '',
+                filesModified: [],
+                durationMs: 0,
+                exitCode: 1
+              },
+              validations: [],
+              consensusReached: false
+            }
+          ]
+        }
+      ],
+      lead: 'claude',
+      validators: ['codex'],
+      config: {
+        maxIterations: 2,
+        timeoutPerCycle: 1,
+        sandbox: false,
+        stopOnFailure: false,
+        verbose: false,
+        quiet: true,
+        preflight: false,
+        preflightThreshold: 70,
+        preflightIterations: 2
+      },
+      status: 'partial',
+      currentSpecIndex: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    await fs.mkdir(path.join(projectDir, '.ai-coord', 'sessions'), { recursive: true });
+    await fs.writeFile(
+      path.join(projectDir, '.ai-coord', 'sessions', `${priorSession.id}.json`),
+      JSON.stringify(priorSession, null, 2),
+      'utf8'
+    );
+    await fs.writeFile(path.join(projectDir, '.ai-coord', 'session'), priorSession.id, 'utf8');
+
+    const options: RunOptions = {
+      specs: undefined,
+      exclude: undefined,
+      lead: undefined,
+      validators: undefined,
+      maxIterations: 2,
+      timeout: 1,
+      resume: false,
+      stopOnFailure: false,
+      leadPermissions: undefined,
+      sandbox: false,
+      interactive: false,
+      verbose: false,
+      quiet: true,
+      dryRun: false,
+      preflight: false,
+      preflightThreshold: 70,
+      preflightIterations: 2,
+      startOver: false
+    };
+
+    const runner = {
+      async runLead() {
+        return { output: 'done', exitCode: 0, durationMs: 5, streamed: false };
+      },
+      async runValidator() {
+        return {
+          output: 'COMPLETENESS: 100%\\nSTATUS: PASS\\nGAPS:\\n- None\\nRECOMMENDATIONS:\\n- None',
+          exitCode: 0,
+          durationMs: 5,
+          streamed: false
+        };
+      }
+    };
+
+    await runCoordinator(options, {
+      cwd: projectDir,
+      output: process.stdout,
+      errorOutput: process.stderr,
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH}`,
+        AIC_TEST_MODE: '1'
+      }
+    }, { runner });
+
+    const updated = await fs.readFile(path.join(projectDir, '.ai-coord', 'sessions', `${priorSession.id}.json`), 'utf8');
+    const parsed = JSON.parse(updated) as { specs: Array<{ status: string; lastError?: string }> };
+    expect(parsed.specs[0]?.status).toBe('skipped');
+    expect(parsed.specs[0]?.lastError).toContain('Manual review required');
   });
 });
