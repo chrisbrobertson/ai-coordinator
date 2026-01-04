@@ -391,14 +391,24 @@ Instructions:
 4. Rate implementation completeness (0-100%)
 5. List specific issues that must be addressed
 
-Response Format:
-COMPLETENESS: {percentage}%
-STATUS: {PASS|FAIL}
-GAPS:
-- {gap_1}
-- {gap_2}
-RECOMMENDATIONS:
-- {recommendation_1}
+Response Format (JSON only):
+```json
+{
+  "response_block": {
+    "completeness": 0,
+    "status": "PASS",
+    "findings": [
+      {
+        "spec_requirement": "string",
+        "gap_description": "string",
+        "original_code": "string",
+        "proposed_diff": "string"
+      }
+    ],
+    "recommendations": ["string"]
+  }
+}
+```
 ```
 
 **Validation Criteria:**

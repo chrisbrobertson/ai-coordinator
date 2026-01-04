@@ -14,7 +14,14 @@ class MockRunner {
   }
   async runValidator(): Promise<ExecutionResult> {
     return {
-      output: 'COMPLETENESS: 100%\nSTATUS: PASS\nGAPS:\n- None\nRECOMMENDATIONS:\n- None',
+      output: JSON.stringify({
+        response_block: {
+          completeness: 100,
+          status: 'PASS',
+          findings: [],
+          recommendations: ['None']
+        }
+      }),
       exitCode: 0,
       durationMs: 5,
       streamed: false

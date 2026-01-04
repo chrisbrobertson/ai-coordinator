@@ -734,7 +734,7 @@ async function buildValidationPrompt(specContent, contextDocs, cwd, specFile) {
     const contextHint = contextDocs.length > 0
         ? 'System/architecture specs are present in the specs directory and should be used for context.'
         : 'Use any relevant supporting specs in the specs directory for context.';
-    return `You are validating an implementation against its specification.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Read the codebase thoroughly.\n3. Compare implementation to each requirement in the spec.\n4. Identify gaps, missing features, or deviations.\n5. Rate implementation completeness (0-100%).\n6. List specific issues that must be addressed.\n\n${contextHint}\n\nIMPLEMENTATION (current codebase):\n${codebaseContent}\n\nSTRICT OUTPUT REQUIRED: Return ONLY a single JSON object with exactly one key named "response_block".\nThe value must be ONLY the following response format block and nothing else.\nCOMPLETENESS: {percentage}%\nSTATUS: {PASS|FAIL}\nGAPS:\n- {gap_1}\n- {gap_2}\nRECOMMENDATIONS:\n- {recommendation_1}`;
+    return `You are validating an implementation against its specification.\n\nTarget spec: specs/${specFile}\n\nAct as a strict reviewer: find edge cases, type holes, exception paths, security issues, and behavior mismatches. Propose a concrete diff for each finding.\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Read the codebase thoroughly.\n3. Compare implementation to each requirement in the spec.\n4. Identify gaps, missing features, or deviations.\n5. Rate implementation completeness (0-100%).\n6. Produce findings with exact references and proposed code changes.\n\n${contextHint}\n\nIMPLEMENTATION (current codebase):\n${codebaseContent}\n\nSTRICT OUTPUT REQUIRED: Return ONLY a single JSON object with exactly one key named "response_block".\nThe value MUST be an object with the following shape:\n{\n  \"completeness\": number,\n  \"status\": \"PASS\" | \"FAIL\",\n  \"findings\": [\n    {\n      \"spec_requirement\": string,\n      \"gap_description\": string,\n      \"original_code\": string,\n      \"proposed_diff\": string\n    }\n  ],\n  \"recommendations\": [string]\n}\n\nDo not include any other text or markdown.`;
 }
 async function readCodebaseContent(cwd) {
     const files = await listFilesRecursive(cwd, {
@@ -774,78 +774,67 @@ function toValidation(tool, prompt, result) {
     };
 }
 export function parseValidationOutput(output) {
-    const cleanedOutput = stripTrailingResponseTemplate(extractResponseBlock(output));
-    const completenessMatch = cleanedOutput.match(/COMPLETENESS:\s*(\d+)%/i);
-    const statusMatch = cleanedOutput.match(/STATUS:\s*(PASS|FAIL)/i);
-    if (!completenessMatch || !statusMatch) {
-        throw new Error('Validator output missing required response format (COMPLETENESS/STATUS).');
+    const structured = parseStructuredValidation(output);
+    if (structured) {
+        return structured;
     }
-    const completeness = Number(completenessMatch[1]);
-    const status = statusMatch[1].toUpperCase();
-    const gaps = extractBullets(cleanedOutput, 'GAPS:');
-    const recommendations = extractBullets(cleanedOutput, 'RECOMMENDATIONS:');
-    return { completeness, status, gaps, recommendations };
+    throw new Error('Validator output missing required JSON response format.');
 }
-function extractBullets(output, section) {
-    const index = output.toUpperCase().indexOf(section.toUpperCase());
-    if (index === -1) {
-        return [];
+function parseStructuredValidation(output) {
+    const trimmed = output.trim();
+    if (!trimmed.startsWith('{')) {
+        throw new Error('Validator output missing required JSON response format.');
     }
-    const lines = output.slice(index).split('\n').slice(1);
-    const items = [];
-    for (const line of lines) {
-        const match = line.match(/^\s*-\s+(.*)/);
-        if (match) {
-            items.push(match[1].trim());
-        }
-        else if (line.trim() !== '' && !line.startsWith(' ')) {
-            break;
-        }
+    let parsed;
+    try {
+        parsed = JSON.parse(trimmed);
     }
-    return items;
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`Validator output JSON parse error: ${message}`);
+    }
+    const response = parsed.response_block ?? parsed;
+    if (!response || typeof response !== 'object') {
+        throw new Error('Validator output JSON missing response_block object.');
+    }
+    const record = response;
+    const completenessValue = record.completeness;
+    const statusValue = record.status;
+    if (typeof completenessValue !== 'number' || (statusValue !== 'PASS' && statusValue !== 'FAIL')) {
+        throw new Error('Validator output JSON missing completeness/status fields.');
+    }
+    if (!Array.isArray(record.findings)) {
+        throw new Error('Validator output JSON missing findings array.');
+    }
+    const gaps = record.findings.map((finding) => formatFindingGap(finding)).filter(Boolean);
+    const recommendations = Array.isArray(record.recommendations)
+        ? record.recommendations.filter((item) => typeof item === 'string')
+        : [];
+    return {
+        completeness: completenessValue,
+        status: statusValue,
+        gaps,
+        recommendations
+    };
+}
+function formatFindingGap(finding) {
+    if (!finding || typeof finding !== 'object') {
+        return '';
+    }
+    const record = finding;
+    const requirement = typeof record.spec_requirement === 'string' ? record.spec_requirement.trim() : '';
+    const gap = typeof record.gap_description === 'string' ? record.gap_description.trim() : '';
+    const original = typeof record.original_code === 'string' ? record.original_code.trim() : '';
+    const proposed = typeof record.proposed_diff === 'string' ? record.proposed_diff.trim() : '';
+    const parts = [
+        requirement ? `Requirement: ${requirement}` : '',
+        gap ? `Gap: ${gap}` : '',
+        original ? `Original: ${original}` : 'Original: (missing)',
+        proposed ? `Proposed diff: ${proposed}` : 'Proposed diff: (missing)'
+    ].filter(Boolean);
+    return parts.join(' | ');
 }
 // Strict parsing enforced; missing fields should error out.
-function stripTrailingResponseTemplate(output) {
-    const index = output.toLowerCase().indexOf('response format:');
-    if (index === -1) {
-        return output;
-    }
-    return output.slice(0, index).trim();
-}
-function extractResponseBlock(output) {
-    const trimmed = output.trim();
-    if (!trimmed) {
-        return output;
-    }
-    if (!trimmed.startsWith('{')) {
-        return output;
-    }
-    try {
-        const parsed = JSON.parse(trimmed);
-        if (typeof parsed.response_block === 'string') {
-            return parsed.response_block;
-        }
-        const content = parsed.content;
-        if (Array.isArray(content)) {
-            const text = content
-                .map((item) => (item && typeof item === 'object' && 'text' in item ? String(item.text) : ''))
-                .join('');
-            if (text.trim()) {
-                return text;
-            }
-        }
-        if (typeof content === 'string' && content.trim()) {
-            return content;
-        }
-        if (typeof parsed.text === 'string' && parsed.text.trim()) {
-            return parsed.text;
-        }
-    }
-    catch {
-        // Not JSON; fall through to raw output.
-    }
-    return output;
-}
 function looksLikeText(content) {
     if (content.includes('\u0000')) {
         return false;
@@ -1184,7 +1173,10 @@ async function runValidationPass(input) {
         }
         catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            if (!message.includes('Validator output missing required response format')) {
+            const shouldRetry = message.includes('Validator output')
+                || message.includes('JSON')
+                || message.includes('response_block');
+            if (!shouldRetry) {
                 await writeTextFile(reportPath, result.output || 'No output captured.');
                 if (input.options.verbose) {
                     input.output.write(`[report] ${reportPath}\n`);
@@ -1247,7 +1239,7 @@ async function runValidationPass(input) {
     return validations;
 }
 function buildValidationRetryPrompt(prompt) {
-    return `${prompt}\n\nFORMAT RECOVERY: You must return ONLY JSON with one key \"response_block\".\nThe value must be ONLY the response format block (COMPLETENESS/STATUS/GAPS/RECOMMENDATIONS).`;
+    return `${prompt}\n\nFORMAT RECOVERY: You must return ONLY JSON with one key \"response_block\".\nThe value must be an object with completeness/status/findings/recommendations as specified.`;
 }
 function buildValidationReportPath(cwd, sessionId, specId, cycleNumber, tool) {
     const safeSpec = specId.replace(/[^a-z0-9-_]/gi, '_');

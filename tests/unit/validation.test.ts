@@ -4,21 +4,41 @@ import { hasConsensus, parseValidationOutput } from '../../src/orchestration/run
 
 describe('validation parsing', () => {
   it('parses validation output', () => {
-    const output = `COMPLETENESS: 90%\nSTATUS: PASS\nGAPS:\n- Missing tests\nRECOMMENDATIONS:\n- Add coverage`;
+    const output = JSON.stringify({
+      response_block: {
+        completeness: 90,
+        status: 'PASS',
+        findings: [],
+        recommendations: ['Add coverage']
+      }
+    });
     const parsed = parseValidationOutput(output);
     expect(parsed.completeness).toBe(90);
     expect(parsed.status).toBe('PASS');
-    expect(parsed.gaps).toEqual(['Missing tests']);
+    expect(parsed.gaps).toEqual([]);
   });
 
-  it('parses response blocks wrapped in JSON', () => {
+  it('parses structured response JSON', () => {
     const output = JSON.stringify({
-      response_block: 'COMPLETENESS: 80%\nSTATUS: FAIL\nGAPS:\n- Gap\nRECOMMENDATIONS:\n- Fix'
+      response_block: {
+        completeness: 70,
+        status: 'FAIL',
+        findings: [
+          {
+            spec_requirement: 'Spec says X',
+            gap_description: 'Missing X handling',
+            original_code: 'No handler',
+            proposed_diff: 'diff --git a/file b/file'
+          }
+        ],
+        recommendations: ['Add handler']
+      }
     });
     const parsed = parseValidationOutput(output);
-    expect(parsed.completeness).toBe(80);
+    expect(parsed.completeness).toBe(70);
     expect(parsed.status).toBe('FAIL');
-    expect(parsed.gaps).toEqual(['Gap']);
+    expect(parsed.gaps[0]).toContain('Spec says X');
+    expect(parsed.gaps[0]).toContain('Missing X handling');
   });
 
   it('computes consensus rules', () => {
@@ -31,12 +51,27 @@ describe('validation parsing', () => {
   });
 
   it('throws when status line is missing', () => {
-    const output = `COMPLETENESS: 100%\nGAPS:\n- None\nRECOMMENDATIONS:\n- None`;
-    expect(() => parseValidationOutput(output)).toThrow(/response format/i);
+    const output = JSON.stringify({
+      response_block: {
+        completeness: 100,
+        findings: []
+      }
+    });
+    expect(() => parseValidationOutput(output)).toThrow(/missing completeness\/status/i);
   });
 
   it('throws when completeness line is missing', () => {
-    const output = `STATUS: PASS\nGAPS:\n- None\nRECOMMENDATIONS:\n- None`;
-    expect(() => parseValidationOutput(output)).toThrow(/response format/i);
+    const output = JSON.stringify({
+      response_block: {
+        status: 'PASS',
+        findings: []
+      }
+    });
+    expect(() => parseValidationOutput(output)).toThrow(/missing completeness\/status/i);
+  });
+
+  it('throws when JSON is not provided', () => {
+    const output = 'COMPLETENESS: 100%';
+    expect(() => parseValidationOutput(output)).toThrow(/json/i);
   });
 });

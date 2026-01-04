@@ -13,7 +13,14 @@ class MockRunner {
   }
   async runValidator(_tool: string, _prompt: string, _cwd: string, _timeoutMs: number) {
     return {
-      output: 'COMPLETENESS: 100%\nSTATUS: PASS\nGAPS:\n- None\nRECOMMENDATIONS:\n- None',
+      output: JSON.stringify({
+        response_block: {
+          completeness: 100,
+          status: 'PASS',
+          findings: [],
+          recommendations: ['None']
+        }
+      }),
       exitCode: 0,
       durationMs: 5,
       streamed: false
@@ -113,7 +120,14 @@ describe('runCoordinator integration', () => {
       },
       async runValidator() {
         return {
-          output: 'COMPLETENESS: 100%\\nSTATUS: PASS\\nGAPS:\\n- None\\nRECOMMENDATIONS:\\n- None',
+          output: JSON.stringify({
+            response_block: {
+              completeness: 100,
+              status: 'PASS',
+              findings: [],
+              recommendations: ['None']
+            }
+          }),
           exitCode: 0,
           durationMs: 5,
           streamed: false
@@ -186,7 +200,14 @@ describe('runCoordinator integration', () => {
       },
       async runValidator() {
         return {
-          output: 'COMPLETENESS: 100%\\nSTATUS: PASS\\nGAPS:\\n- None\\nRECOMMENDATIONS:\\n- None',
+          output: JSON.stringify({
+            response_block: {
+              completeness: 100,
+              status: 'PASS',
+              findings: [],
+              recommendations: ['None']
+            }
+          }),
           exitCode: 0,
           durationMs: 5,
           streamed: false
@@ -298,7 +319,14 @@ describe('runCoordinator integration', () => {
       },
       async runValidator() {
         return {
-          output: 'COMPLETENESS: 100%\\nSTATUS: PASS\\nGAPS:\\n- None\\nRECOMMENDATIONS:\\n- None',
+          output: JSON.stringify({
+            response_block: {
+              completeness: 100,
+              status: 'PASS',
+              findings: [],
+              recommendations: ['None']
+            }
+          }),
           exitCode: 0,
           durationMs: 5,
           streamed: false
@@ -365,7 +393,14 @@ describe('runCoordinator integration', () => {
           return { output: 'bad output', exitCode: 0, durationMs: 5, streamed: false };
         }
         return {
-          output: 'COMPLETENESS: 100%\\nSTATUS: PASS\\nGAPS:\\n- None\\nRECOMMENDATIONS:\\n- None',
+          output: JSON.stringify({
+            response_block: {
+              completeness: 100,
+              status: 'PASS',
+              findings: [],
+              recommendations: ['None']
+            }
+          }),
           exitCode: 0,
           durationMs: 5,
           streamed: false
@@ -503,7 +538,14 @@ describe('runCoordinator integration', () => {
       },
       async runValidator() {
         return {
-          output: 'COMPLETENESS: 100%\\nSTATUS: PASS\\nGAPS:\\n- None\\nRECOMMENDATIONS:\\n- None',
+          output: JSON.stringify({
+            response_block: {
+              completeness: 100,
+              status: 'PASS',
+              findings: [],
+              recommendations: ['None']
+            }
+          }),
           exitCode: 0,
           durationMs: 5,
           streamed: false
