@@ -5,6 +5,7 @@ export interface RunDependencies {
 export interface ValidationOnlyOptions {
     specs?: string;
     exclude?: string;
+    validators?: string;
     timeout: number;
     verbose: boolean;
     heartbeat: number;

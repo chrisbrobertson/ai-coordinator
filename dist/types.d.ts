@@ -27,6 +27,7 @@ export interface SpecEntry {
 export type SessionStatus = 'pending' | 'in_progress' | 'completed' | 'partial' | 'failed' | 'abandoned';
 export interface SessionConfig {
     maxIterations: number;
+    maxIterationsPerRun: number;
     timeoutPerCycle: number;
     leadPermissions?: string[];
     sandbox: boolean;
@@ -90,6 +91,7 @@ export interface RunOptions {
     lead?: ToolName;
     validators?: string;
     maxIterations: number;
+    maxIterationsPerRun: number;
     timeout: number;
     resume: boolean;
     stopOnFailure: boolean;

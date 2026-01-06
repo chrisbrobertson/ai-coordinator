@@ -33,6 +33,9 @@ export class DefaultToolRunner {
         if (result.exitCode === 0 || this.config.interactive) {
             return result;
         }
+        if (!shouldRetryWithoutReadOnly(definition.name, result.output)) {
+            return result;
+        }
         if (this.config.onWarning) {
             this.config.onWarning(`Validator ${definition.name} did not accept read-only flags; falling back to full permissions.`);
         }
@@ -193,6 +196,19 @@ function shouldRetryWithoutOutputFormat(tool, output) {
     }
     const lower = output.toLowerCase();
     return lower.includes('--output-format')
+        && (lower.includes('unknown option')
+            || lower.includes('unrecognized option')
+            || lower.includes('invalid option')
+            || lower.includes('unknown flag')
+            || lower.includes('unrecognized flag'));
+}
+function shouldRetryWithoutReadOnly(tool, output) {
+    if (tool !== 'claude' && tool !== 'gemini') {
+        return false;
+    }
+    const lower = output.toLowerCase();
+    const readOnlyFlag = tool === 'claude' ? '--allowedtools' : '--read-only';
+    return lower.includes(readOnlyFlag)
         && (lower.includes('unknown option')
             || lower.includes('unrecognized option')
             || lower.includes('invalid option')

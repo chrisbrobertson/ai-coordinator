@@ -60,6 +60,7 @@ describe('SIGINT handling', () => {
       lead: undefined,
       validators: undefined,
       maxIterations: 1,
+      maxIterationsPerRun: 1,
       timeout: 1,
       resume: false,
       stopOnFailure: false,

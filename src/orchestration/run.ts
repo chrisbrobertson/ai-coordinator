@@ -21,6 +21,7 @@ export interface RunDependencies {
 export interface ValidationOnlyOptions {
   specs?: string;
   exclude?: string;
+  validators?: string;
   timeout: number;
   verbose: boolean;
   heartbeat: number;
@@ -31,6 +32,8 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
   const cwd = context.cwd;
   const output = context.output;
   const errorOutput = context.errorOutput;
+  const toolThrottleMs = getToolThrottleMs(context.env);
+  let lastToolCallAt = 0;
 
   const spinner = ora({ isEnabled: false });
   await autoCleanState(cwd);
@@ -119,6 +122,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       validators: roleAssignment.validators,
       config: {
         maxIterations: options.maxIterations,
+        maxIterationsPerRun: options.maxIterationsPerRun,
         timeoutPerCycle: options.timeout,
         leadPermissions: options.leadPermissions ? options.leadPermissions.split(',') : undefined,
         sandbox: options.sandbox,
@@ -132,14 +136,30 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       env: context.env
     });
   }
-  leadTool = session.lead;
+  let activeValidators = session.validators;
+  if (session) {
+    const adjusted = normalizeResumedRoles(session, availableTools);
+    if (adjusted.changed) {
+      session.lead = adjusted.lead;
+      session.validators = adjusted.validators;
+    }
+    if (session.config.maxIterations !== options.maxIterations) {
+      session.config.maxIterations = options.maxIterations;
+    }
+    if (session.config.maxIterationsPerRun !== options.maxIterationsPerRun) {
+      session.config.maxIterationsPerRun = options.maxIterationsPerRun;
+    }
+    await persistSession(session, context.env);
+    leadTool = session.lead;
+    activeValidators = session.validators;
+  }
 
   output.write(formatStartSummary({
     cwd,
     specsDir,
     specs: entries,
     lead: leadTool,
-    validators: roleAssignment.validators,
+    validators: activeValidators,
     isResume: options.resume
   }));
   if (!options.quiet) {
@@ -233,12 +253,14 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
 
     const specContent = orderedLoaded.find((spec) => spec.entry.path === specEntry.path)?.content ?? '';
 
-    const iterations = session.config.maxIterations;
+    const totalIterations = session.config.maxIterations;
     const totalCycles = specEntry.cycles.length;
-    const remainingCycles = Math.max(0, iterations - totalCycles);
+    const remainingCycles = Math.max(0, totalIterations - totalCycles);
+    const runIterations = Math.max(1, options.maxIterationsPerRun);
+    const runCycles = Math.min(remainingCycles, runIterations);
 
     if (remainingCycles === 0) {
-      const maxMessage = `Max total iterations reached for ${specEntry.file} (${totalCycles}/${iterations}). Manual review required.`;
+      const maxMessage = `Max total iterations reached for ${specEntry.file} (${totalCycles}/${totalIterations}). Manual review required.`;
       specEntry.status = 'skipped';
       specEntry.completedAt = new Date().toISOString();
       specEntry.lastError = maxMessage;
@@ -255,7 +277,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
     await persistSession(session, context.env);
     let validationFeedback = '';
     let validateOnly = false;
-    let validationIterations = remainingCycles;
+    let validationIterations = runCycles;
 
     const wasCompleted = completedSpecs.has(specEntry.meta.id) || completedSpecs.has(specEntry.file);
     if (options.preflight && (hasCodeArtifacts || wasCompleted)) {
@@ -263,12 +285,13 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         output.write(`Preflight validation for ${specEntry.file}...\n`);
       }
       const validationPrompt = await buildValidationPrompt(specContent, contextDocs, cwd, specEntry.file);
+      const preflightCap = Math.min(runIterations + 1, remainingCycles);
       const validations = await runValidationPass({
         cycleNumber: 0,
         specEntry,
         session,
         validationPrompt,
-        roleAssignment,
+        roleAssignment: { validators: activeValidators },
         runner,
         cwd,
         timeoutMs: options.timeout * 60_000,
@@ -276,6 +299,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         options,
         currentRunIterations: validationIterations,
         totalCyclesBeforeRun: totalCycles,
+        preflightTotalCap: totalCycles + preflightCap,
         logger,
         onProcessComplete: () => {
           activeProcess = null;
@@ -291,7 +315,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       );
       if (consensus || avgCompleteness >= options.preflightThreshold) {
         validateOnly = true;
-        validationIterations = Math.min(options.preflightIterations, remainingCycles);
+        validationIterations = Math.min(options.preflightIterations, preflightCap);
         if (consensus) {
           specEntry.status = 'completed';
           specEntry.completedAt = new Date().toISOString();
@@ -311,7 +335,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         session.id,
         specEntry.meta.id,
         cycleNumber - 1,
-        roleAssignment.validators
+        activeValidators
       );
       const historicalReports = await getRecentReportSummaries(cwd, specEntry.meta.id, 6);
       let leadResult = {
@@ -336,12 +360,16 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         let lastError: Error | null = null;
         for (let index = 0; index < fallbackLeads.length; index += 1) {
           const candidate = fallbackLeads[index];
-          spinner.start(`Cycle ${cycleNumber}/${validationIterations} (total ${totalCycleNumber}/${iterations}): Lead implementing ${specEntry.file}`);
+          spinner.start(`Cycle ${cycleNumber}/${validationIterations} (total ${totalCycleNumber}/${totalIterations}): Lead implementing ${specEntry.file}`);
           if (options.verbose) {
             output.write(`[lead:${candidate}] starting\n`);
           }
           try {
+            await throttleToolCall(toolThrottleMs, () => {
+              lastToolCallAt = Date.now();
+            }, lastToolCallAt);
             leadResult = await runLeadWithRetry(runner, candidate, leadPrompt, cwd, options.timeout * 60_000, logger);
+            lastToolCallAt = Date.now();
             leadTool = candidate;
             session.lead = candidate;
             break;
@@ -357,6 +385,15 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
                 logger.warn({ from: candidate, to: nextLead }, 'Lead rate limit detected; switching lead tool');
                 leadTool = nextLead;
                 session.lead = nextLead;
+                activeValidators = session.validators.filter((tool) => tool !== leadTool);
+                if (activeValidators.length === 0) {
+                  activeValidators = availableTools.filter((tool) => tool !== leadTool);
+                  session.validators = activeValidators;
+                }
+                if (toolThrottleMs > 0) {
+                  await sleep(toolThrottleMs);
+                  lastToolCallAt = Date.now();
+                }
                 await persistSession(session, context.env);
                 continue;
               }
@@ -452,7 +489,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         specEntry,
         session,
         validationPrompt,
-        roleAssignment,
+        roleAssignment: { validators: activeValidators },
         runner,
         cwd,
         timeoutMs: options.timeout * 60_000,
@@ -460,6 +497,12 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         options,
         currentRunIterations: validationIterations,
         totalCyclesBeforeRun: totalCycles,
+        throttle: async () => {
+          await throttleToolCall(toolThrottleMs, () => {
+            lastToolCallAt = Date.now();
+          }, lastToolCallAt);
+          lastToolCallAt = Date.now();
+        },
         logger,
         onProcessComplete: () => {
           activeProcess = null;
@@ -470,12 +513,31 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         }
       });
 
+      if (!options.quiet) {
+        const gapLines: string[] = [];
+        validations.forEach((validation) => {
+          const gaps = validation.parsed.gaps;
+          if (gaps.length === 0) {
+            gapLines.push(`- ${validation.tool}: no gaps reported`);
+            return;
+          }
+          gaps.forEach((gap) => {
+            gapLines.push(`- ${validation.tool}: ${gap}`);
+          });
+        });
+        if (gapLines.length > 0) {
+          output.write(`Validator gaps for ${specEntry.file}:\n`);
+          output.write(`${gapLines.join('\n')}\n`);
+        }
+      }
+
       if (options.verbose) {
         validations.forEach((validation) => {
           logger.info({ cycle: cycleNumber, tool: validation.tool, output: validation.output }, 'Validator output');
         });
       }
-      const consensusReached = hasConsensus(validations.map((validation) => validation.parsed));
+      const consensusReached = hasConsensus(validations.map((validation) => validation.parsed))
+        || validations.every((validation) => validation.parsed.gaps.length === 0);
       if (!consensusReached) {
         validationFeedback = buildValidationFeedback(validations);
       }
@@ -529,8 +591,8 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       }
 
       if (cycleNumber === validationIterations) {
-        if (totalCycleNumber >= iterations) {
-          const maxMessage = `Max total iterations reached for ${specEntry.file} (${totalCycleNumber}/${iterations}). Manual review required.`;
+        if (totalCycleNumber >= totalIterations) {
+          const maxMessage = `Max total iterations reached for ${specEntry.file} (${totalCycleNumber}/${totalIterations}). Manual review required.`;
           specEntry.status = 'skipped';
           specEntry.completedAt = new Date().toISOString();
           specEntry.lastError = maxMessage;
@@ -546,7 +608,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
           output.write(chalk.yellow(`Run iteration limit reached for ${specEntry.file} (${cycleNumber}/${validationIterations}). Resume to continue.\n`));
         }
       } else {
-        output.write(`Cycle ${cycleNumber}/${validationIterations} (total ${totalCycleNumber}/${iterations}): Lead completed, awaiting validation...\n`);
+        output.write(`Cycle ${cycleNumber}/${validationIterations} (total ${totalCycleNumber}/${totalIterations}): Lead completed, awaiting validation...\n`);
       }
     }
   }
@@ -586,6 +648,8 @@ export async function runValidationOnly(
 ): Promise<void> {
   const cwd = context.cwd;
   const output = context.output;
+  const toolThrottleMs = getToolThrottleMs(context.env);
+  let lastToolCallAt = 0;
 
   const spinner = ora({ isEnabled: false });
   await autoCleanState(cwd);
@@ -594,10 +658,22 @@ export async function runValidationOnly(
   const registry = await detectTools(context.env);
   spinner.stop();
 
-  const validators = [...registry.available.keys()];
-  if (validators.length === 0) {
+  const availableValidators = [...registry.available.keys()];
+  if (availableValidators.length === 0) {
     throw new Error('No AI tools found. Install at least one: claude, codex, or gemini');
   }
+  const requestedValidators = options.validators
+    ? (options.validators.split(',').map((value) => value.trim()).filter(Boolean) as ToolName[])
+    : undefined;
+  if (requestedValidators && requestedValidators.length > 0) {
+    const missing = requestedValidators.filter((tool) => !registry.available.has(tool));
+    if (missing.length > 0) {
+      throw new Error(`Requested validator tool(s) not available: ${missing.join(', ')}`);
+    }
+  }
+  const validators = requestedValidators && requestedValidators.length > 0
+    ? requestedValidators
+    : availableValidators;
 
   const specsDir = path.join(cwd, SPECS_DIR);
   const includeSpecs = options.specs ? options.specs.split(',').map((value) => value.trim()).filter(Boolean) : undefined;
@@ -621,6 +697,7 @@ export async function runValidationOnly(
     validators,
     config: {
       maxIterations: 1,
+      maxIterationsPerRun: 1,
       timeoutPerCycle: options.timeout,
       leadPermissions: undefined,
       sandbox: false,
@@ -713,34 +790,41 @@ export async function runValidationOnly(
       specEntry,
       session,
       validationPrompt,
-      roleAssignment: { validators },
-      runner,
-      cwd,
-      timeoutMs: options.timeout * 60_000,
+        roleAssignment: { validators },
+        runner,
+        cwd,
+        timeoutMs: options.timeout * 60_000,
       output,
       options: {
-        specs: undefined,
-        exclude: undefined,
-        lead: undefined,
+          specs: undefined,
+          exclude: undefined,
+          lead: undefined,
         validators: validators.join(','),
-        maxIterations: 1,
-        timeout: options.timeout,
-        resume: false,
-        stopOnFailure: false,
-        leadPermissions: undefined,
-        sandbox: false,
-        interactive: false,
-        verbose: options.verbose,
-        heartbeat: options.heartbeat,
-        quiet: options.quiet,
-        dryRun: false,
-        preflight: false,
-        preflightThreshold: 0,
-        preflightIterations: 0,
-        startOver: false
-      },
+          maxIterations: 1,
+          maxIterationsPerRun: 1,
+          timeout: options.timeout,
+          resume: false,
+          stopOnFailure: false,
+          leadPermissions: undefined,
+          sandbox: false,
+          interactive: false,
+          verbose: options.verbose,
+          heartbeat: options.heartbeat,
+          quiet: options.quiet,
+          dryRun: false,
+          preflight: false,
+          preflightThreshold: 0,
+          preflightIterations: 0,
+          startOver: false
+        },
       currentRunIterations: 1,
       totalCyclesBeforeRun: specEntry.cycles.length,
+      throttle: async () => {
+        await throttleToolCall(toolThrottleMs, () => {
+          lastToolCallAt = Date.now();
+        }, lastToolCallAt);
+        lastToolCallAt = Date.now();
+      },
       logger,
       onProcessComplete: () => {
         activeProcess = null;
@@ -750,6 +834,24 @@ export async function runValidationOnly(
         }
       }
     });
+
+    if (!options.quiet) {
+      const gapLines: string[] = [];
+      validations.forEach((validation) => {
+        const gaps = validation.parsed.gaps;
+        if (gaps.length === 0) {
+          gapLines.push(`- ${validation.tool}: no gaps reported`);
+          return;
+        }
+        gaps.forEach((gap) => {
+          gapLines.push(`- ${validation.tool}: ${gap}`);
+        });
+      });
+      if (gapLines.length > 0) {
+        output.write(`Validator gaps for ${specEntry.file}:\n`);
+        output.write(`${gapLines.join('\n')}\n`);
+      }
+    }
 
     const consensusReached = hasConsensus(validations.map((validation) => validation.parsed));
     specEntry.status = consensusReached ? 'completed' : 'failed';
@@ -824,7 +926,10 @@ function buildLeadPrompt(
   const reportContentSection = reportSummaries
     ? `\n\nPREVIOUS REPORT CONTENT (most recent first):\n${reportSummaries}`
     : '';
-  return `You are implementing a feature defined in the project specs.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Implement the requirements in that spec.\n3. Follow the acceptance criteria precisely.\n4. Address any gaps identified in previous validation feedback.\n5. Review prior execution/validation reports and avoid repeating known issues.\n6. Explain significant implementation decisions.\n\n${contextHint}${reportSection}${reportContentSection}\n\nCURRENT CODEBASE STATE (summary):\n${codebaseSummary}\n\nPREVIOUS VALIDATION FEEDBACK (if any):\n${validationFeedback}`;
+  if (validationFeedback) {
+    return `You are continuing implementation based on validator feedback.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Read and understand the existing codebase.\n3. Resolve each gap listed below using concrete code changes only.\n4. Do not re-implement features that already meet the spec unless required by a gap.\n5. Explain significant implementation decisions.\n\n${contextHint}${reportSection}${reportContentSection}\n\nCURRENT CODEBASE STATE (summary):\n${codebaseSummary}\n\nVALIDATOR GAPS TO RESOLVE:\n${validationFeedback}`;
+  }
+  return `You are implementing a feature defined in the project specs.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Implement the requirements in that spec end-to-end.\n3. Follow the acceptance criteria precisely.\n4. Review prior execution/validation reports and avoid repeating known issues.\n5. Explain significant implementation decisions.\n\n${contextHint}${reportSection}${reportContentSection}\n\nCURRENT CODEBASE STATE (summary):\n${codebaseSummary}\n\nPREVIOUS VALIDATION FEEDBACK (if any):\n${validationFeedback}`;
 }
 
 async function buildValidationPrompt(specContent: string, contextDocs: string[], cwd: string, specFile: string): Promise<string> {
@@ -1010,6 +1115,39 @@ function isRateLimitMessage(message: string): boolean {
   );
 }
 
+function normalizeResumedRoles(session: Session, availableTools: ToolName[]): {
+  lead: ToolName;
+  validators: ToolName[];
+  changed: boolean;
+} {
+  const availableSet = new Set(availableTools);
+  if (availableTools.length < 2) {
+    throw new Error('At least 2 AI tools required');
+  }
+
+  let lead: ToolName = session.lead;
+  let changed = false;
+  if (!availableSet.has(lead)) {
+    const fallback = availableTools[0];
+    lead = fallback;
+    changed = true;
+  }
+
+  let validators = session.validators.filter((tool) => tool !== lead && availableSet.has(tool));
+  if (validators.length === 0) {
+    validators = availableTools.filter((tool) => tool !== lead);
+    changed = true;
+  }
+  if (validators.length === 0) {
+    throw new Error('At least 1 validator required');
+  }
+
+  if (lead !== session.lead || validators.length !== session.validators.length) {
+    changed = true;
+  }
+  return { lead, validators, changed };
+}
+
 async function runLeadWithRetry(runner: ToolRunner, tool: ToolName, prompt: string, cwd: string, timeoutMs: number, logger?: any) {
   const first = await runner.runLead(tool, prompt, cwd, timeoutMs);
   if (isRateLimitMessage(first.output)) {
@@ -1066,10 +1204,15 @@ function buildValidationFeedback(validations: Validation[]): string {
   if (failing.length === 0) {
     return '';
   }
-  const lines = ['Validator gaps:'];
+  const lines = ['Validator gaps (detailed):'];
   for (const validation of failing) {
-    const gaps = validation.parsed.gaps.join('; ') || 'No gaps provided';
-    lines.push(`- ${validation.tool}: ${gaps}`);
+    if (validation.parsed.gaps.length === 0) {
+      lines.push(`- ${validation.tool}: No gaps provided`);
+      continue;
+    }
+    validation.parsed.gaps.forEach((gap) => {
+      lines.push(`- ${validation.tool}: ${gap}`);
+    });
   }
   return lines.join('\n');
 }
@@ -1253,6 +1396,38 @@ async function hasImplementationArtifacts(cwd: string): Promise<boolean> {
   return files.length > 0;
 }
 
+function getToolThrottleMs(env: NodeJS.ProcessEnv): number {
+  if (env.AIC_TEST_MODE === '1' || env.NODE_ENV === 'test') {
+    return 0;
+  }
+  const raw = env.AIC_TOOL_THROTTLE_MS;
+  if (!raw) {
+    return 2000;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 2000;
+}
+
+async function throttleToolCall(
+  throttleMs: number,
+  onThrottle: () => void,
+  lastCallAt: number
+): Promise<void> {
+  if (throttleMs <= 0) {
+    return;
+  }
+  const elapsed = Date.now() - lastCallAt;
+  const wait = throttleMs - elapsed;
+  if (wait > 0) {
+    await sleep(wait);
+  }
+  onThrottle();
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function getRecentReportSummaries(cwd: string, specId: string, limit: number): Promise<string> {
   const reportsDir = getProjectReportsDir(cwd);
   if (!(await pathExists(reportsDir))) {
@@ -1292,6 +1467,8 @@ async function runValidationPass(input: {
   options: RunOptions;
   currentRunIterations: number;
   totalCyclesBeforeRun: number;
+  preflightTotalCap?: number;
+  throttle?: () => Promise<void>;
   onProcessComplete?: () => void;
   logger?: any;
 }): Promise<Validation[]> {
@@ -1299,13 +1476,17 @@ async function runValidationPass(input: {
   const totalCycleNumber = input.cycleNumber === 0
     ? input.totalCyclesBeforeRun
     : input.totalCyclesBeforeRun + input.cycleNumber;
+  const totalCap = input.preflightTotalCap ?? input.session.config.maxIterations;
   const label = input.cycleNumber === 0
-    ? `Preflight: Validators running (total ${totalCycleNumber}/${input.session.config.maxIterations})`
-    : `Cycle ${input.cycleNumber}/${input.currentRunIterations} (total ${totalCycleNumber}/${input.session.config.maxIterations}): Validators running`;
+    ? `Preflight: Validators running for ${input.specEntry.file} (total ${totalCycleNumber}/${totalCap})`
+    : `Cycle ${input.cycleNumber}/${input.currentRunIterations} (total ${totalCycleNumber}/${input.session.config.maxIterations}): Validators running for ${input.specEntry.file}`;
   validationSpinner.start(label);
   await ensureDir(getProjectReportsDir(input.cwd));
-  const validations = await Promise.all(
-    input.roleAssignment.validators.map(async (tool) => {
+  const validations: Validation[] = [];
+  for (const tool of input.roleAssignment.validators) {
+    if (input.throttle) {
+      await input.throttle();
+    }
       if (input.options.verbose) {
         input.output.write(`[validator:${tool}] starting\n`);
       }
@@ -1335,7 +1516,8 @@ async function runValidationPass(input: {
         if (input.options.verbose) {
           input.output.write(`[report] ${reportPath}\n`);
         }
-        return validation;
+        validations.push(validation);
+        continue;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const shouldRetry = message.includes('Validator output')
@@ -1351,6 +1533,9 @@ async function runValidationPass(input: {
         const retryPrompt = buildValidationRetryPrompt(input.validationPrompt);
         if (input.options.verbose) {
           input.output.write(`[validator:${tool}] retrying with format recovery\n`);
+        }
+        if (input.throttle) {
+          await input.throttle();
         }
         result = await input.runner.runValidator(tool, retryPrompt, input.cwd, input.timeoutMs);
 
@@ -1377,7 +1562,8 @@ async function runValidationPass(input: {
           if (input.options.verbose) {
             input.output.write(`[report] ${reportPath}\n`);
           }
-          return validation;
+          validations.push(validation);
+          continue;
         } catch (retryError) {
           const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
           const fallbackOutput = [
@@ -1388,7 +1574,7 @@ async function runValidationPass(input: {
           if (input.options.verbose) {
             input.output.write(`[report] ${reportPath}\n`);
           }
-          return {
+          validations.push({
             tool,
             prompt: retryPrompt,
             output: result.output,
@@ -1400,11 +1586,10 @@ async function runValidationPass(input: {
             },
             durationMs: result.durationMs,
             exitCode: result.exitCode
-          };
+          });
         }
       }
-    })
-  );
+  }
   validationSpinner.stop();
   return validations;
 }

@@ -74,7 +74,7 @@ aic run [options]
 aic validate [options]
 aic tools
 aic init
-aic specs
+aic specs [--status] [--detailed]
 aic status [--full]
 aic config [key=value]
 aic clean
@@ -86,7 +86,8 @@ aic clean
 --exclude <files>       # Comma-separated list or glob of specs to exclude
 --lead <tool>           # Force lead tool (claude|codex|gemini)
 --validators <tools>    # Comma-separated list of validator tools
---max-iterations <n>    # Max cycles per spec (default: 15)
+--max-iterations <n>    # Total max cycles per spec across all runs (default: 15)
+--max-iterations-per-run <n> # Max cycles per spec per run (default: 5)
 --timeout <minutes>     # Per-cycle timeout in minutes (default: 10)
 --preflight-threshold <n> # Preflight completeness threshold (default: 70)
 --preflight-iterations <n> # Max validation cycles in preflight mode (default: 2)

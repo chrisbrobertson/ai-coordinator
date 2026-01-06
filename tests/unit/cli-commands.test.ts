@@ -61,6 +61,105 @@ describe('cli commands', () => {
     expect(stdout.output).toContain('completed');
   });
 
+  it('lists specs with detailed status', async () => {
+    const projectDir = await createTempDir('aic-cli-specs-detail-');
+    const specsDir = path.join(projectDir, 'specs');
+    await fs.mkdir(specsDir, { recursive: true });
+    await fs.writeFile(path.join(specsDir, 'feat-core.md'), specContent, 'utf8');
+
+    const sessionId = 'session-456';
+    const sessionsDir = path.join(projectDir, '.ai-coord', 'sessions');
+    await fs.mkdir(sessionsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(sessionsDir, `${sessionId}.json`),
+      JSON.stringify({
+        id: sessionId,
+        workingDirectory: projectDir,
+        specsDirectory: specsDir,
+        specs: [
+          {
+            file: 'feat-core.md',
+            path: path.join(specsDir, 'feat-core.md'),
+            status: 'failed',
+            cycles: [
+              {
+                number: 1,
+                specId: 'feat-core',
+                startedAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+                leadExecution: {
+                  tool: 'claude',
+                  prompt: '',
+                  output: '',
+                  filesModified: [],
+                  durationMs: 0,
+                  exitCode: 1
+                },
+                validations: [
+                  {
+                    tool: 'codex',
+                    prompt: '',
+                    output: '',
+                    parsed: {
+                      completeness: 60,
+                      status: 'FAIL',
+                      gaps: ['Requirement: X | Gap: Y'],
+                      recommendations: []
+                    },
+                    durationMs: 0,
+                    exitCode: 0
+                  }
+                ],
+                consensusReached: false
+              }
+            ]
+          }
+        ],
+        lead: 'claude',
+        validators: ['codex'],
+        config: {},
+        status: 'partial',
+        currentSpecIndex: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }),
+      'utf8'
+    );
+    await fs.writeFile(path.join(projectDir, '.ai-coord', 'session'), sessionId, 'utf8');
+
+    const stdout = createOutputBuffer();
+    await runCli({
+      argv: ['specs', '--status', '--detailed'],
+      cwd: projectDir,
+      stdout: stdout.stream,
+      stderr: createOutputBuffer().stream,
+      env: process.env
+    });
+
+    expect(stdout.output).toContain('cycles: 1');
+    expect(stdout.output).toContain('gaps (1):');
+    expect(stdout.output).toContain('Requirement: X');
+  });
+
+  it('rejects detailed without status', async () => {
+    const projectDir = await createTempDir('aic-cli-specs-detail-error-');
+    const specsDir = path.join(projectDir, 'specs');
+    await fs.mkdir(specsDir, { recursive: true });
+    await fs.writeFile(path.join(specsDir, 'feat-core.md'), specContent, 'utf8');
+
+    const stdout = createOutputBuffer();
+    const stderr = createOutputBuffer();
+    await runCli({
+      argv: ['specs', '--detailed'],
+      cwd: projectDir,
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      env: process.env
+    });
+
+    expect(stderr.output).toContain('--detailed requires --status');
+  });
+
   it('shows status summary and history', async () => {
     const projectDir = await createTempDir('aic-cli-status-');
     const sessionsDir = path.join(projectDir, '.ai-coord', 'sessions');

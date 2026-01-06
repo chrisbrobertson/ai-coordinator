@@ -48,7 +48,8 @@ export async function runCli(options) {
         .option('--exclude <files>', 'Comma-separated list or glob of specs to exclude')
         .option('--lead <tool>', 'Force lead tool (claude|codex|gemini)')
         .option('--validators <tools>', 'Comma-separated list of validator tools')
-        .option('--max-iterations <n>', 'Max cycles per spec', Number, 15)
+        .option('--max-iterations <n>', 'Total max cycles per spec across all runs', Number, 15)
+        .option('--max-iterations-per-run <n>', 'Max cycles per spec per run', Number, 5)
         .option('--timeout <minutes>', 'Per-cycle timeout in minutes', Number, 10)
         .option('--preflight-threshold <n>', 'Preflight completeness threshold (0-100)', Number, 70)
         .option('--preflight-iterations <n>', 'Max validation cycles in preflight mode', Number, 2)
@@ -84,6 +85,7 @@ export async function runCli(options) {
         .description('Validate specs without running the lead tool')
         .option('--specs <files>', 'Comma-separated list or glob of specs to include')
         .option('--exclude <files>', 'Comma-separated list or glob of specs to exclude')
+        .option('--validators <tools>', 'Comma-separated list of validator tools')
         .option('--timeout <minutes>', 'Per-cycle timeout in minutes', Number, 10)
         .option('--verbose', 'Verbose output')
         .option('--heartbeat <seconds>', 'Verbose heartbeat interval in seconds (0 to disable)', Number, 0)
@@ -124,7 +126,9 @@ export async function runCli(options) {
     });
     program.command('specs')
         .description('List specs in the specs directory')
-        .action(async () => {
+        .option('--status', 'Show per-spec status details')
+        .option('--detailed', 'Show full gap details (requires --status)')
+        .action(async (cmd) => {
         const specsDir = path.join(cwd, SPECS_DIR);
         const loaded = await loadSpecs(specsDir);
         const ordered = orderSpecs(loaded.map((spec) => spec.entry));
@@ -132,17 +136,73 @@ export async function runCli(options) {
             stdout.write('No specs found.\n');
             return;
         }
+        if (cmd.detailed && !cmd.status) {
+            stderr.write('--detailed requires --status\n');
+            process.exitCode = 1;
+            return;
+        }
         const session = await loadSession(cwd, env);
         const statusByPath = new Map();
+        const sessionByPath = new Map();
         if (session) {
             for (const spec of session.specs) {
                 statusByPath.set(spec.path, spec.status);
+                sessionByPath.set(spec.path, spec);
             }
         }
         ordered.forEach((spec) => {
             const status = statusByPath.get(spec.path);
             const suffix = status ? ` - ${status}` : '';
             stdout.write(`${spec.file} (${spec.meta.complexity}, Level ${spec.meta.maturity})${suffix}\n`);
+            if (!cmd.status) {
+                return;
+            }
+            const entry = sessionByPath.get(spec.path);
+            if (!entry) {
+                stdout.write('  cycles: 0\n');
+                stdout.write('  gaps: none (no session data)\n');
+                return;
+            }
+            const cycles = entry.cycles?.length ?? 0;
+            const lastCycle = cycles > 0 ? entry.cycles[cycles - 1] : undefined;
+            const lastCompleteness = lastCycle
+                ? Math.round(lastCycle.validations.reduce((sum, validation) => sum + validation.parsed.completeness, 0)
+                    / Math.max(lastCycle.validations.length, 1))
+                : 0;
+            stdout.write(`  cycles: ${cycles}\n`);
+            stdout.write(`  last completeness: ${lastCompleteness}%\n`);
+            if (!lastCycle || lastCycle.validations.length === 0) {
+                stdout.write('  gaps: none\n');
+                return;
+            }
+            const gapLines = [];
+            const gapLinesFull = [];
+            lastCycle.validations.forEach((validation) => {
+                if (validation.parsed.gaps.length === 0) {
+                    return;
+                }
+                validation.parsed.gaps.forEach((gap) => {
+                    gapLines.push(`${validation.tool}: ${summarizeGap(gap)}`);
+                    gapLinesFull.push(`${validation.tool}: ${gap}`);
+                });
+            });
+            if (gapLines.length === 0) {
+                stdout.write('  gaps: none\n');
+                return;
+            }
+            stdout.write(`  gaps (${gapLines.length}):\n`);
+            if (cmd.detailed) {
+                gapLinesFull.forEach((gap) => {
+                    stdout.write(`  - ${gap}\n`);
+                });
+                return;
+            }
+            gapLines.slice(0, 5).forEach((gap) => {
+                stdout.write(`  - ${gap}\n`);
+            });
+            if (gapLines.length > 5) {
+                stdout.write(`  - ...and ${gapLines.length - 5} more\n`);
+            }
         });
     });
     program.command('status')
@@ -221,6 +281,13 @@ export function createProgram() {
         .description('AI Spec Coordinator')
         .version('0.9.0');
     return program;
+}
+function summarizeGap(gap, limit = 160) {
+    const trimmed = gap.trim();
+    if (trimmed.length <= limit) {
+        return trimmed;
+    }
+    return `${trimmed.slice(0, limit - 1)}…`;
 }
 function formatSessionStatus(session) {
     const activeSpec = session.specs.find((spec) => spec.status === 'in_progress')?.file ?? 'None';

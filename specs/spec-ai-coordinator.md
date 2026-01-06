@@ -436,11 +436,13 @@ The system determines when implementation is complete based on Validator agreeme
 The system enforces iteration limits and provides progress feedback.
 
 **Configuration:**
-- `--max-iterations=N` (default: 15)
+- `--max-iterations=N` (default: 15, total across runs)
+- `--max-iterations-per-run=N` (default: 5)
 - `--timeout-per-cycle=M` minutes (default: 10)
 
 **Validation Criteria:**
-- Given max-iterations=3 and 3 cycles complete without consensus, Then mark spec skipped and advise manual review
+- Given max-iterations-per-run=3 and 3 cycles complete without consensus, Then mark spec failed for this run and allow resume
+- Given max-iterations=15 total cycles without consensus, Then mark spec skipped and advise manual review
 - Given a cycle exceeds timeout, Then kill subprocess and count as failed cycle
 - Progress displayed after each cycle: "Cycle 2/5 (total 7/15): Lead completed, awaiting validation..."
 
