@@ -62,7 +62,31 @@ export class DefaultToolRunner {
                 const schema = {
                     type: 'object',
                     properties: {
-                        response_block: { type: 'string' }
+                        response_block: {
+                            type: 'object',
+                            properties: {
+                                completeness: { type: 'number' },
+                                status: { type: 'string', enum: ['PASS', 'FAIL'] },
+                                findings: {
+                                    type: 'array',
+                                    items: {
+                                        type: 'object',
+                                        properties: {
+                                            spec_requirement: { type: 'string' },
+                                            gap_description: { type: 'string' },
+                                            original_code: { type: 'string' },
+                                            proposed_diff: { type: 'string' }
+                                        },
+                                        required: ['spec_requirement', 'gap_description', 'original_code', 'proposed_diff']
+                                    }
+                                },
+                                recommendations: {
+                                    type: 'array',
+                                    items: { type: 'string' }
+                                }
+                            },
+                            required: ['completeness', 'status', 'findings', 'recommendations']
+                        }
                     },
                     required: ['response_block'],
                     additionalProperties: false

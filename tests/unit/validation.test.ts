@@ -57,7 +57,7 @@ describe('validation parsing', () => {
         findings: []
       }
     });
-    expect(() => parseValidationOutput(output)).toThrow(/missing completeness\/status/i);
+    expect(() => parseValidationOutput(output)).toThrow(/missing "status"/i);
   });
 
   it('throws when completeness line is missing', () => {
@@ -67,7 +67,7 @@ describe('validation parsing', () => {
         findings: []
       }
     });
-    expect(() => parseValidationOutput(output)).toThrow(/missing completeness\/status/i);
+    expect(() => parseValidationOutput(output)).toThrow(/missing "completeness".*available fields/i);
   });
 
   it('throws when JSON is not provided', () => {

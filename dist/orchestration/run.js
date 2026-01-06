@@ -832,11 +832,38 @@ function buildLeadPrompt(specContent, contextDocs, validationFeedback, codebaseS
     return `You are implementing a feature defined in the project specs.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Implement the requirements in that spec end-to-end.\n3. Follow the acceptance criteria precisely.\n4. Review prior execution/validation reports and avoid repeating known issues.\n5. Explain significant implementation decisions.\n\n${contextHint}${reportSection}${reportContentSection}\n\nCURRENT CODEBASE STATE (summary):\n${codebaseSummary}\n\nPREVIOUS VALIDATION FEEDBACK (if any):\n${validationFeedback}`;
 }
 async function buildValidationPrompt(specContent, contextDocs, cwd, specFile) {
-    const codebaseContent = await readCodebaseContent(cwd);
     const contextHint = contextDocs.length > 0
         ? 'System/architecture specs are present in the specs directory and should be used for context.'
         : 'Use any relevant supporting specs in the specs directory for context.';
-    return `You are validating an implementation against its specification.\n\nTarget spec: specs/${specFile}\n\nAct as a strict reviewer: find edge cases, type holes, exception paths, security issues, and behavior mismatches. Propose a concrete diff for each finding.\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Read the codebase thoroughly.\n3. Compare implementation to each requirement in the spec.\n4. Identify gaps, missing features, or deviations.\n5. Rate implementation completeness (0-100%).\n6. Produce findings with exact references and proposed code changes.\n\n${contextHint}\n\nIMPLEMENTATION (current codebase):\n${codebaseContent}\n\nSTRICT OUTPUT REQUIRED: Return ONLY a single JSON object with exactly one key named "response_block".\nThe value MUST be an object with the following shape:\n{\n  \"completeness\": number,\n  \"status\": \"PASS\" | \"FAIL\",\n  \"findings\": [\n    {\n      \"spec_requirement\": string,\n      \"gap_description\": string,\n      \"original_code\": string,\n      \"proposed_diff\": string\n    }\n  ],\n  \"recommendations\": [string]\n}\n\nDo not include any other text or markdown.`;
+    return `You are validating an implementation against its specification.\n\nTarget spec: specs/${specFile}\n\nAct as a strict reviewer: find edge cases, type holes, exception paths, security issues, and behavior mismatches. Propose a concrete diff for each finding.\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Use Read, Grep, Glob, and other file tools to explore and understand the codebase thoroughly.\n3. Compare implementation to each requirement in the spec.\n4. Identify gaps, missing features, or deviations.\n5. Rate implementation completeness (0-100%).\n6. Produce findings with exact references and proposed code changes.\n\n${contextHint}\n\nIMPORTANT: You have access to the working directory. Use your file reading tools (Read, Grep, Glob, etc.) to examine the codebase.\n\nCRITICAL OUTPUT FORMAT REQUIREMENTS:
+- Return ONLY valid JSON
+- Do NOT include markdown code blocks (no \`\`\`)
+- Do NOT include any explanatory text before or after the JSON
+- Do NOT include any comments within the JSON
+- Your entire response must be EXACTLY this JSON structure:
+
+{
+  "response_block": {
+    "completeness": 85,
+    "status": "FAIL",
+    "findings": [
+      {
+        "spec_requirement": "Example requirement from spec",
+        "gap_description": "Description of what's missing",
+        "original_code": "Current code snippet",
+        "proposed_diff": "Suggested change"
+      }
+    ],
+    "recommendations": ["First recommendation", "Second recommendation"]
+  }
+}
+
+FIELD REQUIREMENTS:
+- "completeness": MUST be a number from 0 to 100 (not a string)
+- "status": MUST be exactly "PASS" or "FAIL" (case-sensitive)
+- "findings": MUST be an array (use [] if no findings)
+- "recommendations": MUST be an array (use [] if no recommendations)
+- Each finding MUST have all four fields: spec_requirement, gap_description, original_code, proposed_diff`;
 }
 async function readCodebaseContent(cwd) {
     const files = await listFilesRecursive(cwd, {
@@ -844,6 +871,8 @@ async function readCodebaseContent(cwd) {
         limit: 100
     });
     const chunks = [];
+    let totalSize = 0;
+    const maxTotalSize = 500_000; // 500KB total limit to avoid context overflow
     for (const file of files) {
         const stat = await fs.stat(file);
         if (stat.size > 50_000) {
@@ -853,11 +882,28 @@ async function readCodebaseContent(cwd) {
         if (!looksLikeText(content)) {
             continue;
         }
-        chunks.push(`# ${path.relative(cwd, file)}\n${content}`);
+        const chunk = `# ${path.relative(cwd, file)}\n${content}`;
+        if (totalSize + chunk.length > maxTotalSize) {
+            chunks.push(`\n... (${files.length - chunks.length} more files omitted to stay within context limits)`);
+            break;
+        }
+        chunks.push(chunk);
+        totalSize += chunk.length;
     }
     return chunks.join('\n\n');
 }
 function toValidation(tool, prompt, result) {
+    // Check for common tool errors before trying to parse as validation output
+    const lowerOutput = result.output.toLowerCase();
+    if (lowerOutput.includes('prompt is too long') || lowerOutput.includes('prompt too long')) {
+        throw new Error(`Validator ${tool} failed: Prompt exceeds tool's context limit. Consider reducing codebase size or using --exclude.`);
+    }
+    if (lowerOutput.includes('usage limit') || lowerOutput.includes('rate limit')) {
+        throw new Error(`Validator ${tool} failed: Usage/rate limit reached. Try again later or use a different validator.`);
+    }
+    if (lowerOutput.includes('authentication') || lowerOutput.includes('not authenticated')) {
+        throw new Error(`Validator ${tool} failed: Authentication error. Check tool credentials.`);
+    }
     let parsed;
     try {
         parsed = parseValidationOutput(result.output);
@@ -884,16 +930,38 @@ export function parseValidationOutput(output) {
 }
 function parseStructuredValidation(output) {
     const trimmed = output.trim();
-    if (!trimmed.startsWith('{')) {
+    let jsonText = trimmed;
+    // Extract JSON from markdown code blocks if present
+    const codeBlockMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+    if (codeBlockMatch) {
+        jsonText = codeBlockMatch[1].trim();
+    }
+    if (!jsonText.startsWith('{')) {
         throw new Error('Validator output missing required JSON response format.');
     }
+    // Try to extract just the JSON portion if there's extra text after it
+    // This handles cases where tools output JSON followed by additional content
     let parsed;
     try {
-        parsed = JSON.parse(trimmed);
+        parsed = JSON.parse(jsonText);
     }
     catch (error) {
+        // If parsing fails, try to extract just the JSON object
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`Validator output JSON parse error: ${message}`);
+        const match = message.match(/position (\d+)/);
+        if (match) {
+            const position = parseInt(match[1], 10);
+            // Try parsing just up to the error position
+            try {
+                parsed = JSON.parse(jsonText.substring(0, position));
+            }
+            catch {
+                throw new Error(`Validator output JSON parse error: ${message}`);
+            }
+        }
+        else {
+            throw new Error(`Validator output JSON parse error: ${message}`);
+        }
     }
     const response = parsed.response_block ?? parsed;
     if (!response || typeof response !== 'object') {
@@ -902,8 +970,19 @@ function parseStructuredValidation(output) {
     const record = response;
     const completenessValue = record.completeness;
     const statusValue = record.status;
-    if (typeof completenessValue !== 'number' || (statusValue !== 'PASS' && statusValue !== 'FAIL')) {
-        throw new Error('Validator output JSON missing completeness/status fields.');
+    // Provide detailed error messages for missing or invalid fields
+    if (completenessValue === undefined) {
+        const availableFields = Object.keys(record).join(', ');
+        throw new Error(`Validator output JSON missing "completeness" field. Available fields: ${availableFields}`);
+    }
+    if (typeof completenessValue !== 'number') {
+        throw new Error(`Validator output JSON "completeness" field must be a number, got: ${typeof completenessValue}`);
+    }
+    if (statusValue === undefined) {
+        throw new Error('Validator output JSON missing "status" field.');
+    }
+    if (statusValue !== 'PASS' && statusValue !== 'FAIL') {
+        throw new Error(`Validator output JSON "status" field must be "PASS" or "FAIL", got: ${statusValue}`);
     }
     if (!Array.isArray(record.findings)) {
         throw new Error('Validator output JSON missing findings array.');
@@ -1406,7 +1485,27 @@ async function runValidationPass(input) {
     return validations;
 }
 function buildValidationRetryPrompt(prompt) {
-    return `${prompt}\n\nFORMAT RECOVERY: You must return ONLY JSON with one key \"response_block\".\nThe value must be an object with completeness/status/findings/recommendations as specified.`;
+    return `${prompt}\n\nFORMAT RECOVERY REQUIRED: Your previous response was invalid.
+You MUST return ONLY a valid JSON object with NO additional text before or after.
+The JSON must have exactly this structure:
+
+{
+  "response_block": {
+    "completeness": <number from 0 to 100>,
+    "status": "<exactly 'PASS' or 'FAIL'>",
+    "findings": [
+      {
+        "spec_requirement": "<string>",
+        "gap_description": "<string>",
+        "original_code": "<string>",
+        "proposed_diff": "<string>"
+      }
+    ],
+    "recommendations": ["<string>"]
+  }
+}
+
+Do not include markdown code blocks, explanatory text, or any content except the JSON object.`;
 }
 function buildValidationReportPath(cwd, sessionId, specId, cycleNumber, tool) {
     const safeSpec = specId.replace(/[^a-z0-9-_]/gi, '_');

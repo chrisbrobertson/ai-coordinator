@@ -49,18 +49,42 @@ Option B: Schema-enforced output (recommended)
 
 codex exec --output-schema schema.json --color never "Task..."
 
-Minimal validator-safe schema:
+Full validator schema:
 
 {
   "type": "object",
   "properties": {
-    "response_block": { "type": "string" }
+    "response_block": {
+      "type": "object",
+      "properties": {
+        "completeness": { "type": "number" },
+        "status": { "type": "string", "enum": ["PASS", "FAIL"] },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "spec_requirement": { "type": "string" },
+              "gap_description": { "type": "string" },
+              "original_code": { "type": "string" },
+              "proposed_diff": { "type": "string" }
+            },
+            "required": ["spec_requirement", "gap_description", "original_code", "proposed_diff"]
+          }
+        },
+        "recommendations": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["completeness", "status", "findings", "recommendations"]
+    }
   },
   "required": ["response_block"],
   "additionalProperties": false
 }
 
-This guarantees the required response block is always present.
+This schema ensures codex outputs properly structured validation results.
 
 ⸻
 
@@ -77,8 +101,12 @@ Use only in trusted environments.
 1.4 Codex Prompt Contract (Drop-In)
 
 Your final output must be ONLY valid JSON matching the provided schema.
-Put the exact validator-required response in `response_block`.
-Do not include any other text.
+The `response_block` must contain an object with:
+- completeness: number (0-100)
+- status: "PASS" or "FAIL"
+- findings: array of finding objects (empty if no gaps)
+- recommendations: array of strings (empty if none)
+Do not include any other text outside the JSON structure.
 
 
 ⸻
