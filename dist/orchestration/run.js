@@ -862,8 +862,14 @@ function toValidation(tool, prompt, result) {
     if (lowerOutput.includes('usage limit') || lowerOutput.includes('rate limit')) {
         throw new Error(`Validator ${tool} failed: Usage/rate limit reached. Try again later or use a different validator.`);
     }
-    if (lowerOutput.includes('authentication') || lowerOutput.includes('not authenticated')) {
-        throw new Error(`Validator ${tool} failed: Authentication error. Check tool credentials.`);
+    // Check for auth errors, but exclude successful auth messages
+    if (!lowerOutput.includes('loaded cached credentials') &&
+        !lowerOutput.includes('authentication successful') &&
+        (lowerOutput.includes('not authenticated') ||
+            lowerOutput.includes('please set an auth') ||
+            (lowerOutput.includes('api key') && (lowerOutput.includes('missing') || lowerOutput.includes('not found'))) ||
+            (lowerOutput.includes('api_key') && (lowerOutput.includes('missing') || lowerOutput.includes('not found'))))) {
+        throw new Error(`Validator ${tool} failed: Authentication/API key not configured. Check tool credentials and settings.`);
     }
     let parsed;
     try {
@@ -890,10 +896,26 @@ export function parseValidationOutput(output) {
     throw new Error('Validator output missing required JSON response format.');
 }
 function parseStructuredValidation(output) {
-    const trimmed = output.trim();
+    let trimmed = output.trim();
+    // Strip leading text before JSON (e.g., "Loaded cached credentials.")
+    const jsonStartIndex = trimmed.indexOf('{');
+    if (jsonStartIndex > 0) {
+        trimmed = trimmed.substring(jsonStartIndex);
+    }
     let jsonText = trimmed;
+    // First, try to parse as-is to check if it's gemini's wrapper format
+    try {
+        const outerParsed = JSON.parse(trimmed);
+        if (outerParsed.response && typeof outerParsed.response === 'string') {
+            // Gemini format: { session_id: "...", response: "```json\n{...}\n```" }
+            jsonText = outerParsed.response;
+        }
+    }
+    catch {
+        // Not valid JSON or not gemini format, continue with normal parsing
+    }
     // Extract JSON from markdown code blocks if present
-    const codeBlockMatch = trimmed.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+    const codeBlockMatch = jsonText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
     if (codeBlockMatch) {
         jsonText = codeBlockMatch[1].trim();
     }
