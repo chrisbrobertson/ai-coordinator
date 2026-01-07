@@ -14,8 +14,8 @@ export const TOOL_DEFINITIONS = [
     {
         name: 'gemini',
         command: 'gemini',
-        leadArgs: ['-p', '--output-format', 'json'],
-        validatorArgs: ['-p', '--output-format', 'json', '--read-only']
+        leadArgs: ['--output-format', 'json'],
+        validatorArgs: ['--output-format', 'json', '--allowed-tools', 'View,Read,Grep,Glob,LS']
     }
 ];
 export function getToolDefinition(name) {

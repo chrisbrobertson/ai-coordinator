@@ -255,8 +255,7 @@ function shouldRetryWithoutReadOnly(tool: ToolName, output: string): boolean {
     return false;
   }
   const lower = output.toLowerCase();
-  const readOnlyFlag = tool === 'claude' ? '--allowedtools' : '--read-only';
-  return lower.includes(readOnlyFlag)
+  return (lower.includes('--allowedtools') || lower.includes('--allowed-tools'))
     && (lower.includes('unknown option')
       || lower.includes('unrecognized option')
       || lower.includes('invalid option')

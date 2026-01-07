@@ -337,7 +337,6 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         cycleNumber - 1,
         activeValidators
       );
-      const historicalReports = await getRecentReportSummaries(cwd, specEntry.meta.id, 6);
       let leadResult = {
         output: 'Lead skipped: validation-only mode.',
         exitCode: 0,
@@ -350,10 +349,8 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
           specContent,
           contextDocs,
           validationFeedback,
-          await summarizeCodebase(cwd),
           specEntry.file,
-          previousReports,
-          historicalReports
+          previousReports
         );
 
         const fallbackLeads = buildLeadFallbacks(leadTool, availableTools);
@@ -899,37 +896,23 @@ function formatDryRun(specs: SpecEntry[], lead: string, validators: string[]): s
   return lines.join('\n');
 }
 
-async function summarizeCodebase(cwd: string): Promise<string> {
-  const files = await listFilesRecursive(cwd, {
-    excludeDirs: ['node_modules', 'dist', '.git', '.ai-coord'],
-    limit: 50
-  });
-  const relative = files.map((file) => path.relative(cwd, file));
-  return relative.join('\n');
-}
-
 function buildLeadPrompt(
   specContent: string,
   contextDocs: string[],
   validationFeedback: string,
-  codebaseSummary: string,
   specFile: string,
-  reportFiles: string[],
-  reportSummaries: string
+  reportFiles: string[]
 ): string {
   const contextHint = contextDocs.length > 0
     ? 'System/architecture specs are present in the specs directory and should be used for context.'
     : 'Use any relevant supporting specs in the specs directory for context.';
   const reportSection = reportFiles.length > 0
-    ? `\n\nPrevious validation reports:\n${reportFiles.map((file) => `- ${file}`).join('\n')}`
-    : '';
-  const reportContentSection = reportSummaries
-    ? `\n\nPREVIOUS REPORT CONTENT (most recent first):\n${reportSummaries}`
+    ? `\n\nPrevious validation reports (read these files to avoid repeating issues):\n${reportFiles.map((file) => `- ${file}`).join('\n')}`
     : '';
   if (validationFeedback) {
-    return `You are continuing implementation based on validator feedback.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Read and understand the existing codebase.\n3. Resolve each gap listed below using concrete code changes only.\n4. Do not re-implement features that already meet the spec unless required by a gap.\n5. Explain significant implementation decisions.\n\n${contextHint}${reportSection}${reportContentSection}\n\nCURRENT CODEBASE STATE (summary):\n${codebaseSummary}\n\nVALIDATOR GAPS TO RESOLVE:\n${validationFeedback}`;
+    return `You are continuing implementation based on validator feedback.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Use your file tools (Read, Grep, Glob, etc.) to explore and understand the existing codebase.\n3. Resolve each gap listed below using concrete code changes only.\n4. Do not re-implement features that already meet the spec unless required by a gap.\n5. Explain significant implementation decisions.\n\n${contextHint}${reportSection}\n\nVALIDATOR GAPS TO RESOLVE:\n${validationFeedback}`;
   }
-  return `You are implementing a feature defined in the project specs.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Implement the requirements in that spec end-to-end.\n3. Follow the acceptance criteria precisely.\n4. Review prior execution/validation reports and avoid repeating known issues.\n5. Explain significant implementation decisions.\n\n${contextHint}${reportSection}${reportContentSection}\n\nCURRENT CODEBASE STATE (summary):\n${codebaseSummary}\n\nPREVIOUS VALIDATION FEEDBACK (if any):\n${validationFeedback}`;
+  return `You are implementing a feature defined in the project specs.\n\nTarget spec: specs/${specFile}\n\nInstructions:\n1. Read the target spec file in the specs directory and any relevant supporting specs (system-*.md, architecture, schema).\n2. Use your file tools (Read, Grep, Glob, etc.) to explore the codebase.\n3. Implement the requirements in that spec end-to-end.\n4. Follow the acceptance criteria precisely.\n5. If there are previous validation reports, read them to avoid repeating known issues.\n6. Explain significant implementation decisions.\n\n${contextHint}${reportSection}\n\nPREVIOUS VALIDATION FEEDBACK (if any):\n${validationFeedback}`;
 }
 
 async function buildValidationPrompt(specContent: string, contextDocs: string[], cwd: string, specFile: string): Promise<string> {
@@ -965,35 +948,6 @@ FIELD REQUIREMENTS:
 - "findings": MUST be an array (use [] if no findings)
 - "recommendations": MUST be an array (use [] if no recommendations)
 - Each finding MUST have all four fields: spec_requirement, gap_description, original_code, proposed_diff`;
-}
-
-async function readCodebaseContent(cwd: string): Promise<string> {
-  const files = await listFilesRecursive(cwd, {
-    excludeDirs: ['node_modules', 'dist', '.git', '.ai-coord', 'specs', 'data'],
-    limit: 100
-  });
-  const chunks: string[] = [];
-  let totalSize = 0;
-  const maxTotalSize = 500_000; // 500KB total limit to avoid context overflow
-
-  for (const file of files) {
-    const stat = await fs.stat(file);
-    if (stat.size > 50_000) {
-      continue;
-    }
-    const content = await fs.readFile(file, 'utf8');
-    if (!looksLikeText(content)) {
-      continue;
-    }
-    const chunk = `# ${path.relative(cwd, file)}\n${content}`;
-    if (totalSize + chunk.length > maxTotalSize) {
-      chunks.push(`\n... (${files.length - chunks.length} more files omitted to stay within context limits)`);
-      break;
-    }
-    chunks.push(chunk);
-    totalSize += chunk.length;
-  }
-  return chunks.join('\n\n');
 }
 
 function toValidation(tool: string, prompt: string, result: { output: string; exitCode: number; durationMs: number }): Validation {
@@ -1509,32 +1463,6 @@ async function throttleToolCall(
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function getRecentReportSummaries(cwd: string, specId: string, limit: number): Promise<string> {
-  const reportsDir = getProjectReportsDir(cwd);
-  if (!(await pathExists(reportsDir))) {
-    return '';
-  }
-  const safeSpec = specId.replace(/[^a-z0-9-_]/gi, '_');
-  const entries = await fs.readdir(reportsDir);
-  const candidates = await Promise.all(
-    entries
-      .filter((entry) => entry.includes(`-${safeSpec}-`) && entry.endsWith('.md'))
-      .map(async (entry) => {
-        const filePath = path.join(reportsDir, entry);
-        const stat = await fs.stat(filePath);
-        return { filePath, mtimeMs: stat.mtimeMs };
-      })
-  );
-  const sorted = candidates.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, limit);
-  const summaries: string[] = [];
-  for (const entry of sorted) {
-    const content = await fs.readFile(entry.filePath, 'utf8');
-    const trimmed = content.trim().slice(0, 8000);
-    summaries.push(`# ${path.basename(entry.filePath)}\n${trimmed}`);
-  }
-  return summaries.join('\n\n');
 }
 
 async function runValidationPass(input: {
