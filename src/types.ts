@@ -69,6 +69,14 @@ export interface Cycle {
   consensusReached: boolean;
 }
 
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}
+
 export interface LeadExecution {
   tool: ToolName;
   prompt: string;
@@ -76,6 +84,7 @@ export interface LeadExecution {
   filesModified: string[];
   durationMs: number;
   exitCode: number;
+  tokenUsage?: TokenUsage;
 }
 
 export interface Validation {
@@ -85,6 +94,7 @@ export interface Validation {
   parsed: ValidationResult;
   durationMs: number;
   exitCode: number;
+  tokenUsage?: TokenUsage;
 }
 
 export interface ValidationResult {
@@ -140,6 +150,7 @@ export interface ExecutionResult {
   exitCode: number;
   durationMs: number;
   streamed: boolean;
+  tokenUsage?: TokenUsage;
 }
 
 export interface ToolRunner {

@@ -11,24 +11,24 @@ export class DefaultToolRunner {
     async runLead(tool, prompt, cwd, timeoutMs) {
         const definition = getToolDefinition(tool);
         const args = this.buildLeadArgs(definition, prompt);
-        const result = await this.execute(definition.command, args, cwd, timeoutMs);
+        const result = await this.execute(definition.command, args, cwd, timeoutMs, tool);
         if (shouldRetryWithoutOutputFormat(definition.name, result.output)) {
             if (this.config.onWarning) {
                 this.config.onWarning(`${definition.name} does not support --output-format; retrying without JSON output flags.`);
             }
-            return this.execute(definition.command, stripOutputFormatArgs(args), cwd, timeoutMs);
+            return this.execute(definition.command, stripOutputFormatArgs(args), cwd, timeoutMs, tool);
         }
         return result;
     }
     async runValidator(tool, prompt, cwd, timeoutMs) {
         const definition = getToolDefinition(tool);
         const args = this.buildValidatorArgs(definition, prompt);
-        const result = await this.execute(definition.command, args, cwd, timeoutMs);
+        const result = await this.execute(definition.command, args, cwd, timeoutMs, tool);
         if (shouldRetryWithoutOutputFormat(definition.name, result.output)) {
             if (this.config.onWarning) {
                 this.config.onWarning(`${definition.name} does not support --output-format; retrying without JSON output flags.`);
             }
-            return this.execute(definition.command, stripOutputFormatArgs(args), cwd, timeoutMs);
+            return this.execute(definition.command, stripOutputFormatArgs(args), cwd, timeoutMs, tool);
         }
         if (result.exitCode === 0 || this.config.interactive) {
             return result;
@@ -39,9 +39,9 @@ export class DefaultToolRunner {
         if (this.config.onWarning) {
             this.config.onWarning(`Validator ${definition.name} did not accept read-only flags; falling back to full permissions.`);
         }
-        return this.execute(definition.command, [prompt], cwd, timeoutMs);
+        return this.execute(definition.command, [prompt], cwd, timeoutMs, tool);
     }
-    async execute(command, args, cwd, timeoutMs) {
+    async execute(command, args, cwd, timeoutMs, tool) {
         const startedAt = Date.now();
         let streamed = false;
         try {
@@ -180,7 +180,8 @@ export class DefaultToolRunner {
             if (schemaFile) {
                 await fs.rm(schemaFile, { force: true });
             }
-            return { output: combined, exitCode: result.exitCode ?? 0, durationMs, streamed };
+            const tokenUsage = extractTokenUsage(tool, combined);
+            return { output: combined, exitCode: result.exitCode ?? 0, durationMs, streamed, tokenUsage };
         }
         catch (error) {
             const durationMs = Date.now() - startedAt;
@@ -258,4 +259,69 @@ function resolveToolHome(env, cwd) {
         return path.join(cwd, '.ai-coord', 'tool-home');
     }
     return null;
+}
+function extractTokenUsage(tool, output) {
+    try {
+        // First, try to find JSON in the output (use non-greedy match for better performance)
+        const jsonMatch = output.match(/\{[\s\S]*?\}/);
+        if (!jsonMatch) {
+            return undefined;
+        }
+        let parsed;
+        try {
+            parsed = JSON.parse(jsonMatch[0]);
+        }
+        catch {
+            // If the first match isn't valid JSON, try to find the last complete JSON object
+            const lastBrace = output.lastIndexOf('}');
+            if (lastBrace === -1) {
+                return undefined;
+            }
+            const firstBrace = output.indexOf('{');
+            if (firstBrace === -1) {
+                return undefined;
+            }
+            parsed = JSON.parse(output.substring(firstBrace, lastBrace + 1));
+        }
+        if (tool === 'claude') {
+            // Claude format: { usage: { input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens } }
+            const usage = parsed.usage;
+            if (usage) {
+                return {
+                    inputTokens: typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined,
+                    outputTokens: typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined,
+                    totalTokens: (typeof usage.input_tokens === 'number' && typeof usage.output_tokens === 'number')
+                        ? usage.input_tokens + usage.output_tokens
+                        : undefined,
+                    cacheReadTokens: typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : undefined,
+                    cacheCreationTokens: typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : undefined
+                };
+            }
+        }
+        else if (tool === 'codex' || tool === 'gemini') {
+            // Codex/Gemini format: { stats: { models: { "model-name": { tokens: { input, output } } } } }
+            const stats = parsed.stats;
+            if (stats && typeof stats.models === 'object' && stats.models) {
+                const models = stats.models;
+                // Get the first model's tokens
+                const modelData = Object.values(models)[0];
+                if (modelData && typeof modelData.tokens === 'object' && modelData.tokens) {
+                    const tokens = modelData.tokens;
+                    const inputTokens = typeof tokens.input === 'number' ? tokens.input : undefined;
+                    const outputTokens = typeof tokens.output === 'number' ? tokens.output : undefined;
+                    return {
+                        inputTokens,
+                        outputTokens,
+                        totalTokens: (inputTokens !== undefined && outputTokens !== undefined)
+                            ? inputTokens + outputTokens
+                            : undefined
+                    };
+                }
+            }
+        }
+        return undefined;
+    }
+    catch {
+        return undefined;
+    }
 }

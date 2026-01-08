@@ -11,7 +11,7 @@ import { loadSpecs, orderSpecs, LoadedSpec } from '../specs/discovery.js';
 import { createSession, persistSession, completeSession, loadSession } from './session.js';
 import { getProjectLogsDir, getProjectReportsDir, getProjectSessionsDir, PROJECT_SESSION_FILE, SPECS_DIR } from '../config/paths.js';
 import { ensureDir, listFilesRecursive, pathExists, writeTextFile } from '../utils/fs.js';
-import { RunContext, RunOptions, SpecEntry, ToolRunner, ValidationResult, Session, Validation, ToolName } from '../types.js';
+import { RunContext, RunOptions, SpecEntry, ToolRunner, ValidationResult, Session, Validation, ToolName, TokenUsage, ExecutionResult } from '../types.js';
 import { createLogger } from '../utils/logger.js';
 
 export interface RunDependencies {
@@ -337,11 +337,12 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         cycleNumber - 1,
         activeValidators
       );
-      let leadResult = {
+      let leadResult: ExecutionResult = {
         output: 'Lead skipped: validation-only mode.',
         exitCode: 0,
         durationMs: 0,
-        streamed: false
+        streamed: false,
+        tokenUsage: undefined
       };
       let leadPrompt = '';
       if (!validateOnly) {
@@ -450,6 +451,7 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
       await writeTextFile(leadReportPath, leadResult.output || 'No output captured.');
         if (options.verbose) {
           output.write(`[report] ${leadReportPath}\n`);
+          output.write(`[lead:${leadTool}] completed: ${formatExecutionMetrics(leadResult.durationMs, leadResult.tokenUsage)}\n`);
         }
       }
       if (interrupted) {
@@ -475,9 +477,20 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
         return;
       }
 
-      logger.info({ cycle: cycleNumber, tool: leadTool }, 'Lead execution completed');
+      logger.info({
+        cycle: cycleNumber,
+        tool: leadTool,
+        durationMs: leadResult.durationMs,
+        tokenUsage: leadResult.tokenUsage
+      }, 'Lead execution completed');
       if (options.verbose) {
-        logger.info({ cycle: cycleNumber, tool: leadTool, output: leadResult.output }, 'Lead output');
+        logger.info({
+          cycle: cycleNumber,
+          tool: leadTool,
+          output: leadResult.output,
+          durationMs: leadResult.durationMs,
+          tokenUsage: leadResult.tokenUsage
+        }, 'Lead output');
       }
 
       const validationPrompt = await buildValidationPrompt(specContent, contextDocs, cwd, specEntry.file);
@@ -550,7 +563,8 @@ export async function runCoordinator(options: RunOptions, context: RunContext, d
           output: leadResult.output,
           filesModified: [],
           durationMs: leadResult.durationMs,
-          exitCode: leadResult.exitCode
+          exitCode: leadResult.exitCode,
+          tokenUsage: leadResult.tokenUsage
         },
         validations,
         consensusReached
@@ -864,7 +878,8 @@ export async function runValidationOnly(
         output: 'Validation-only run.',
         filesModified: [],
         durationMs: 0,
-        exitCode: 0
+        exitCode: 0,
+        tokenUsage: undefined
       },
       validations,
       consensusReached
@@ -882,6 +897,23 @@ export async function runValidationOnly(
   }
   process.off('SIGINT', handleSigint);
   process.off('SIGTERM', handleSigint);
+}
+
+function formatExecutionMetrics(durationMs: number, tokenUsage?: TokenUsage): string {
+  const durationSec = (durationMs / 1000).toFixed(1);
+  const parts: string[] = [`${durationSec}s`];
+
+  if (tokenUsage && tokenUsage.totalTokens) {
+    parts.push(`${tokenUsage.totalTokens.toLocaleString()} tokens`);
+    if (tokenUsage.inputTokens && tokenUsage.outputTokens) {
+      parts.push(`(${tokenUsage.inputTokens.toLocaleString()} in, ${tokenUsage.outputTokens.toLocaleString()} out)`);
+    }
+    if (tokenUsage.cacheReadTokens) {
+      parts.push(`cache: ${tokenUsage.cacheReadTokens.toLocaleString()}`);
+    }
+  }
+
+  return parts.join(', ');
 }
 
 function formatDryRun(specs: SpecEntry[], lead: string, validators: string[]): string {
@@ -950,7 +982,7 @@ FIELD REQUIREMENTS:
 - Each finding MUST have all four fields: spec_requirement, gap_description, original_code, proposed_diff`;
 }
 
-function toValidation(tool: string, prompt: string, result: { output: string; exitCode: number; durationMs: number }): Validation {
+function toValidation(tool: string, prompt: string, result: ExecutionResult): Validation {
   // Check for common tool errors before trying to parse as validation output
   const lowerOutput = result.output.toLowerCase();
   if (lowerOutput.includes('prompt is too long') || lowerOutput.includes('prompt too long')) {
@@ -982,7 +1014,8 @@ function toValidation(tool: string, prompt: string, result: { output: string; ex
     output: result.output,
     parsed,
     durationMs: result.durationMs,
-    exitCode: result.exitCode
+    exitCode: result.exitCode,
+    tokenUsage: result.tokenUsage
   };
 }
 
@@ -1302,12 +1335,35 @@ async function generateReport(session: Session, env: NodeJS.ProcessEnv): Promise
         lastCycle.validations.reduce((sum, validation) => sum + validation.parsed.completeness, 0) / Math.max(lastCycle.validations.length, 1)
       )
       : 0;
+
+    // Calculate total tokens and duration across all cycles
+    let totalLeadTokens = 0;
+    let totalValidatorTokens = 0;
+    let totalDurationMs = 0;
+    for (const cycle of spec.cycles) {
+      if (cycle.leadExecution.tokenUsage?.totalTokens) {
+        totalLeadTokens += cycle.leadExecution.tokenUsage.totalTokens;
+      }
+      totalDurationMs += cycle.leadExecution.durationMs;
+      for (const validation of cycle.validations) {
+        if (validation.tokenUsage?.totalTokens) {
+          totalValidatorTokens += validation.tokenUsage.totalTokens;
+        }
+        totalDurationMs += validation.durationMs;
+      }
+    }
+
     lines.push(`### ${spec.meta.name} (${spec.file})`);
     lines.push(`- Status: ${spec.status}`);
     lines.push(`- Complexity: ${spec.meta.complexity}`);
     lines.push(`- Maturity: ${spec.meta.maturity}`);
     lines.push(`- Cycles to consensus: ${spec.status === 'completed' ? cycles : 'N/A'}`);
     lines.push(`- Final completeness: ${completeness}%`);
+    lines.push(`- Total duration: ${(totalDurationMs / 1000).toFixed(1)}s`);
+    if (totalLeadTokens > 0 || totalValidatorTokens > 0) {
+      const totalTokens = totalLeadTokens + totalValidatorTokens;
+      lines.push(`- Total tokens: ${totalTokens.toLocaleString()} (lead: ${totalLeadTokens.toLocaleString()}, validators: ${totalValidatorTokens.toLocaleString()})`);
+    }
     lines.push(`- Key implementation decisions: Not captured`);
     if (lastCycle && spec.status !== 'completed') {
       const gaps = lastCycle.validations.flatMap((validation) => validation.parsed.gaps);
@@ -1530,7 +1586,7 @@ async function runValidationPass(input: {
       // Log if validator failed with non-zero exit code
       if (result.exitCode !== 0 && input.logger) {
         input.logger.warn(
-          { tool, exitCode: result.exitCode, durationMs: result.durationMs },
+          { tool, exitCode: result.exitCode, durationMs: result.durationMs, tokenUsage: result.tokenUsage },
           'Validator execution returned non-zero exit code'
         );
         if (result.output && result.output.trim().length > 0) {
@@ -1550,6 +1606,7 @@ async function runValidationPass(input: {
         await writeTextFile(reportPath, result.output || 'No output captured.');
         if (input.options.verbose) {
           input.output.write(`[report] ${reportPath}\n`);
+          input.output.write(`[validator:${tool}] completed: ${formatExecutionMetrics(result.durationMs, result.tokenUsage)}\n`);
         }
         validations.push(validation);
         continue;
@@ -1577,7 +1634,7 @@ async function runValidationPass(input: {
         // Log if retry also failed with non-zero exit code
         if (result.exitCode !== 0 && input.logger) {
           input.logger.warn(
-            { tool, exitCode: result.exitCode, durationMs: result.durationMs },
+            { tool, exitCode: result.exitCode, durationMs: result.durationMs, tokenUsage: result.tokenUsage },
             'Validator retry execution returned non-zero exit code'
           );
           if (result.output && result.output.trim().length > 0) {
@@ -1596,6 +1653,7 @@ async function runValidationPass(input: {
           await writeTextFile(reportPath, result.output || 'No output captured.');
           if (input.options.verbose) {
             input.output.write(`[report] ${reportPath}\n`);
+            input.output.write(`[validator:${tool}] completed (retry): ${formatExecutionMetrics(result.durationMs, result.tokenUsage)}\n`);
           }
           validations.push(validation);
           continue;
